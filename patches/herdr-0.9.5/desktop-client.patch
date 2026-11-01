@@ -1,0 +1,1856 @@
+diff --git a/src/client/clipboard_images.rs b/src/client/clipboard_images.rs
+index cd2f148..f7305b3 100644
+--- a/src/client/clipboard_images.rs
++++ b/src/client/clipboard_images.rs
+@@ -9,6 +9,59 @@ use crate::protocol::{ClientClipboardImageTarget, ClientMessage};
+ 
+ use super::{write_to_server, ClientError};
+ 
++/// Snapshot agent labels can survive Ctrl+Z. Confirm the actual foreground job
++/// before turning an otherwise empty desktop paste into a control key.
++#[cfg(unix)]
++pub(super) fn local_codex_is_foreground(pane_id: &str) -> bool {
++    use crate::api::client::{parse_response_value, ApiClient};
++    use crate::api::schema::{Method, PaneProcessInfoParams, Request, ResponseResult};
++
++    let request = Request {
++        id: "client:local-image-paste".into(),
++        method: Method::PaneProcessInfo(PaneProcessInfoParams {
++            pane_id: Some(pane_id.to_owned()),
++        }),
++    };
++    let Ok(response) = ApiClient::local()
++        .request_value_with_timeout(&request, std::time::Duration::from_millis(300))
++        .and_then(parse_response_value)
++    else {
++        return false;
++    };
++    let ResponseResult::PaneProcessInfo { process_info } = response.result else {
++        return false;
++    };
++    foreground_is_codex(pane_id, process_info)
++}
++
++#[cfg(any(unix, test))]
++fn foreground_is_codex(pane_id: &str, info: crate::api::schema::PaneProcessInfo) -> bool {
++    if info.pane_id != pane_id {
++        return false;
++    }
++    let Some(process_group_id) = info.foreground_process_group_id else {
++        return false;
++    };
++    let job = crate::platform::ForegroundJob {
++        process_group_id,
++        processes: info
++            .foreground_processes
++            .into_iter()
++            .map(|process| crate::platform::ForegroundProcess {
++                pid: process.pid,
++                name: process.name,
++                argv0: process.argv0,
++                argv: process.argv,
++                cmdline: process.cmdline,
++            })
++            .collect(),
++    };
++    matches!(
++        crate::detect::identify_agent_in_job(&job),
++        Some((crate::detect::Agent::Codex, _))
++    )
++}
++
+ pub(super) fn write_remote_image_to_server(
+     stream: &mut impl super::ClientMessageSink,
+     target: ClientClipboardImageTarget,
+@@ -252,3 +305,36 @@ fn recognized_image_extension(extension: &str) -> Option<&'static str> {
+         None
+     }
+ }
++
++#[cfg(test)]
++mod local_paste_tests {
++    use super::*;
++
++    #[test]
++    fn local_codex_paste_requires_codex_in_the_actual_foreground_job() {
++        for (name, allowed) in [
++            ("codex", true),
++            ("zsh", false),
++            ("vim", false),
++            ("claude", false),
++        ] {
++            let info: crate::api::schema::PaneProcessInfo = serde_json::from_value(serde_json::json!({
++                "pane_id": "w1:p1", "foreground_process_group_id": 42,
++                "foreground_processes": [{"pid": 42, "name": name, "argv0": name, "argv": [name]}]
++            })).unwrap();
++            assert_eq!(
++                foreground_is_codex("w1:p1", info.clone()),
++                allowed,
++                "{name}"
++            );
++            assert!(!foreground_is_codex("w1:p2", info.clone()));
++            assert!(!foreground_is_codex(
++                "w1:p1",
++                crate::api::schema::PaneProcessInfo {
++                    foreground_process_group_id: None,
++                    ..info
++                }
++            ));
++        }
++    }
++}
+diff --git a/src/client/mod.rs b/src/client/mod.rs
+index f55db19..c0c8f81 100644
+--- a/src/client/mod.rs
++++ b/src/client/mod.rs
+@@ -29,6 +29,7 @@ mod frame_output_tests;
+ mod handshake;
+ mod image_files;
+ mod input;
++mod local_file_actions;
+ mod loop_config;
+ mod notifications;
+ mod shell;
+@@ -450,6 +451,19 @@ async fn run_client_loop(
+     let _ = config.mouse_scroll_lines;
+     let draw_host_cursor = attach_escape.is_none() && should_draw_host_cursor(config.host_cursor);
+     let is_remote_client = is_remote_client_process();
++    // Opt-in for the local desktop launcher only. A client started by SSH/Mosh
++    // must never read the host Mac's clipboard on behalf of a remote user.
++    #[cfg(unix)]
++    let local_image_paste_enabled = std::env::var("HERDR_LOCAL_IMAGE_PASTE").as_deref() == Ok("1")
++        && ![
++            "SSH_CONNECTION",
++            "SSH_CLIENT",
++            "SSH_TTY",
++            "MOSH_IP",
++            "MOSH_CONNECTION",
++        ]
++        .iter()
++        .any(|name| std::env::var_os(name).is_some());
+     let local_unavailable = initial.is_none();
+ 
+     let mut state = ClientState {
+@@ -875,7 +889,7 @@ async fn run_client_loop(
+                             continue;
+                         }
+                     }
+-                    let events = crate::raw_input::parse_framed_input(&data);
++                    let mut events = crate::raw_input::parse_framed_input(&data);
+                     if crate::raw_input::events_require_host_mode_refresh(&events) {
+                         refresh_host_mouse_capture(
+                             state.mouse_capture_active,
+@@ -889,6 +903,17 @@ async fn run_client_loop(
+                     }
+                     let (outcome, frame) = {
+                         let shell = state.shell.as_mut().expect("checked shell mode");
++                        shell.translate_local_codex_image_paste(
++                            &mut events,
++                            local_image_paste_enabled
++                                && !is_remote_client
++                                && write_stream.active_id().is_local()
++                                && write_stream.active_surface_available(),
++                            |pane_id| {
++                                clipboard_images::local_codex_is_foreground(pane_id)
++                                    && crate::platform::read_clipboard_image().is_some()
++                            },
++                        );
+                         let outcome = shell.handle_raw_events(events);
+                         let frame = outcome
+                             .repaint
+diff --git a/src/client/shell.rs b/src/client/shell.rs
+index 2d18044..4256fbc 100644
+--- a/src/client/shell.rs
++++ b/src/client/shell.rs
+@@ -22,6 +22,7 @@ mod graphics;
+ mod input;
+ mod input_source;
+ mod link_hover;
++mod local_files;
+ mod mobile;
+ mod mouse;
+ mod notification_policy;
+diff --git a/src/client/shell/config.rs b/src/client/shell/config.rs
+index 04a3ddb..809e05b 100644
+--- a/src/client/shell/config.rs
++++ b/src/client/shell/config.rs
+@@ -143,6 +143,18 @@ impl ClientShellConfig {
+                     keybinds: config.keybinds(),
+                 }),
+             local_keys: config.keys.clone(),
++            local_file_bindings: config
++                .keybinds()
++                .custom_commands
++                .into_iter()
++                .filter(|binding| {
++                    binding.action == crate::config::CustomCommandAction::PluginAction
++                        && matches!(
++                            binding.command.as_str(),
++                            "local.file-actions.open" | "local.file-actions.reveal"
++                        )
++                })
++                .collect(),
+             keybinding_source: ClientShellKeybindingSource::Local,
+             prompt_new_tab_name: config.ui.prompt_new_tab_name,
+             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
+diff --git a/src/client/shell/context_menu.rs b/src/client/shell/context_menu.rs
+index a7d6322..eae004d 100644
+--- a/src/client/shell/context_menu.rs
++++ b/src/client/shell/context_menu.rs
+@@ -54,9 +54,19 @@ impl ClientContextMenuOverlay {
+                 source_pane_id,
+                 has_manual_label,
+                 right_click_passthrough,
++                local_file,
+                 ..
+             } => {
+-                let mut items = vec![item("Rename pane", Action::RenamePane)];
++                let mut items = Vec::new();
++                if let Some(file) = local_file {
++                    if file.open_command.is_some() {
++                        items.push(item("打开文件", Action::OpenLocalFile));
++                    }
++                    if file.reveal_command.is_some() {
++                        items.push(item("在 Finder 中显示", Action::RevealLocalFile));
++                    }
++                }
++                items.push(item("Rename pane", Action::RenamePane));
+                 if *has_manual_label {
+                     items.push(item("Clear pane name", Action::ClearPaneName));
+                 }
+@@ -143,6 +153,7 @@ impl ClientShellState {
+     }
+ 
+     pub(super) fn open_pane_context_menu(&mut self, pane_id: String, x: u16, y: u16) {
++        let local_file = self.local_file_menu_target(x, y).map(Box::new);
+         let Some(snapshot) = self.snapshot.as_deref() else {
+             return;
+         };
+@@ -160,6 +171,7 @@ impl ClientShellState {
+                 source_pane_id,
+                 has_manual_label: pane.label.is_some(),
+                 right_click_passthrough: pane.right_click_passthrough,
++                local_file,
+             },
+             x,
+             y,
+@@ -206,15 +218,28 @@ impl ClientShellState {
+                 workspace_id,
+                 source_pane_id,
+                 right_click_passthrough,
++                local_file,
+                 ..
+-            } => self.activate_pane_context_action(
+-                pane_id,
+-                workspace_id,
+-                source_pane_id,
+-                right_click_passthrough,
+-                action,
+-                outcome,
+-            ),
++            } => {
++                if matches!(
++                    action,
++                    ClientContextMenuAction::OpenLocalFile
++                        | ClientContextMenuAction::RevealLocalFile
++                ) {
++                    if let Some(file) = local_file {
++                        self.activate_local_file(*file, action, outcome);
++                    }
++                } else {
++                    self.activate_pane_context_action(
++                        pane_id,
++                        workspace_id,
++                        source_pane_id,
++                        right_click_passthrough,
++                        action,
++                        outcome,
++                    );
++                }
++            }
+         }
+         outcome.repaint = true;
+     }
+diff --git a/src/client/shell/input.rs b/src/client/shell/input.rs
+index ee92d59..854c124 100644
+--- a/src/client/shell/input.rs
++++ b/src/client/shell/input.rs
+@@ -1123,6 +1123,40 @@ impl ClientShellState {
+             .map(crate::protocol::ClientClipboardImageTarget::Pane)
+     }
+ 
++    /// A local terminal may represent an image-only Cmd+V as an empty paste.
++    /// The caller must establish that this client and endpoint share the clipboard.
++    #[cfg(any(unix, test))]
++    pub(crate) fn translate_local_codex_image_paste(
++        &self,
++        events: &mut [RawInputEvent],
++        allow_local_clipboard: bool,
++        can_paste_image: impl FnOnce(&str) -> bool,
++    ) {
++        if !allow_local_clipboard
++            || self.copy_mode.is_some()
++            || !matches!(events, [RawInputEvent::Paste(text)] if text.is_empty())
++        {
++            return;
++        }
++        let Some(crate::protocol::ClientClipboardImageTarget::Pane(pane_id)) =
++            self.clipboard_image_target()
++        else {
++            return;
++        };
++        let is_codex = self.snapshot.as_ref().is_some_and(|snapshot| {
++            snapshot
++                .agents
++                .iter()
++                .any(|agent| agent.pane_id == pane_id && agent.agent.as_deref() == Some("codex"))
++        });
++        if is_codex && can_paste_image(&pane_id) {
++            events[0] = RawInputEvent::Key(crate::input::TerminalKey::new(
++                KeyCode::Char('v'),
++                KeyModifiers::CONTROL,
++            ));
++        }
++    }
++
+     /// The tracked press for a release. A press that arrived as text ("A") is
+     /// reported released as its key ("a", shifted alternate "A"), possibly after
+     /// Shift was let go, so the shifted alternate and the letter's other case
+diff --git a/src/client/shell/link_hover.rs b/src/client/shell/link_hover.rs
+index efbc0ee..763c4c7 100644
+--- a/src/client/shell/link_hover.rs
++++ b/src/client/shell/link_hover.rs
+@@ -5,13 +5,13 @@ use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub(super) struct LinkHoverTarget {
+-    pane_id: String,
+-    inner_rect: Rect,
+-    source_rect: SurfaceRect,
+-    content_revision: u64,
+-    offset_from_bottom: Option<u64>,
+-    row: u16,
+-    col: u16,
++    pub(super) pane_id: String,
++    pub(super) inner_rect: Rect,
++    pub(super) source_rect: SurfaceRect,
++    pub(super) content_revision: u64,
++    pub(super) offset_from_bottom: Option<u64>,
++    pub(super) row: u16,
++    pub(super) col: u16,
+ }
+ 
+ impl LinkHoverTarget {
+@@ -28,6 +28,7 @@ pub(super) struct LinkHover {
+     target: LinkHoverTarget,
+     pub(super) regions: Vec<PaneLinkRegion>,
+     resolved: bool,
++    local_file: bool,
+ }
+ 
+ impl ClientShellState {
+@@ -47,7 +48,7 @@ impl ClientShellState {
+             && self.pane_mouse_gesture.is_none()
+     }
+ 
+-    fn link_hover_target_current(&self, target: &LinkHoverTarget) -> bool {
++    pub(super) fn link_hover_target_current(&self, target: &LinkHoverTarget) -> bool {
+         self.link_hover_allowed()
+             && self.pane_surface.as_ref().is_some_and(|surface| {
+                 self.snapshot.as_ref().is_some_and(|snapshot| {
+@@ -79,42 +80,47 @@ impl ClientShellState {
+     }
+ 
+     pub(super) fn update_link_hover(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+-        if mouse.kind != MouseEventKind::Moved
+-            || !mouse.modifiers.contains(KeyModifiers::CONTROL)
+-            || !self.link_hover_allowed()
+-        {
++        if mouse.kind != MouseEventKind::Moved || !self.link_hover_allowed() {
+             outcome.repaint |= self.clear_link_hover();
+             return;
+         }
+-        let Some(hit) = self
+-            .hits
+-            .panes
+-            .iter()
+-            .find(|hit| contains(hit.inner_rect, (mouse.column, mouse.row)))
+-        else {
++        let Some(target) = self.pointer_link_target(mouse.column, mouse.row) else {
+             outcome.repaint |= self.clear_link_hover();
+             return;
+         };
+-        let Some(pane) = self.pane_surface.as_ref().and_then(|surface| {
+-            surface
+-                .panes
+-                .iter()
+-                .find(|pane| pane.pane_id == hit.pane_id)
+-        }) else {
++        if !self.link_hover_target_current(&target) || !target.content_revision.is_multiple_of(2) {
+             outcome.repaint |= self.clear_link_hover();
+             return;
+-        };
+-        let target = LinkHoverTarget {
+-            pane_id: hit.pane_id.clone(),
+-            inner_rect: hit.inner_rect,
+-            source_rect: pane.inner_rect,
+-            content_revision: pane.content_revision,
+-            offset_from_bottom: pane.scroll.map(|scroll| scroll.offset_from_bottom),
+-            row: mouse.row.saturating_sub(hit.inner_rect.y),
+-            col: mouse.column.saturating_sub(hit.inner_rect.x),
+-        };
+-        if !self.link_hover_target_current(&target) || !target.content_revision.is_multiple_of(2) {
++        }
++        if !mouse.modifiers.contains(KeyModifiers::CONTROL) {
++            if self.link_hover.as_ref().is_some_and(|hover| {
++                hover.local_file
++                    && hover.target.same_content(&target)
++                    && hover
++                        .regions
++                        .iter()
++                        .any(|region| region_contains(region, target.col, target.row))
++            }) {
++                return;
++            }
++            let regions = self.local_file_regions(&target);
++            if self
++                .link_hover
++                .as_ref()
++                .is_some_and(|hover| hover.target == target && hover.regions == regions)
++            {
++                return;
++            }
+             outcome.repaint |= self.clear_link_hover();
++            if !regions.is_empty() {
++                self.link_hover = Some(LinkHover {
++                    target,
++                    regions,
++                    resolved: true,
++                    local_file: true,
++                });
++                outcome.repaint = true;
++            }
+             return;
+         }
+         if self.link_hover.as_ref().is_some_and(|hover| {
+@@ -137,10 +143,34 @@ impl ClientShellState {
+             target,
+             regions,
+             resolved,
++            local_file: false,
+         });
+         self.request_link_hover(outcome);
+     }
+ 
++    pub(super) fn pointer_link_target(&self, x: u16, y: u16) -> Option<LinkHoverTarget> {
++        let hit = self
++            .hits
++            .panes
++            .iter()
++            .find(|hit| contains(hit.inner_rect, (x, y)))?;
++        let pane = self.pane_surface.as_ref().and_then(|surface| {
++            surface
++                .panes
++                .iter()
++                .find(|pane| pane.pane_id == hit.pane_id)
++        })?;
++        Some(LinkHoverTarget {
++            pane_id: hit.pane_id.clone(),
++            inner_rect: hit.inner_rect,
++            source_rect: pane.inner_rect,
++            content_revision: pane.content_revision,
++            offset_from_bottom: pane.scroll.map(|scroll| scroll.offset_from_bottom),
++            row: y.saturating_sub(hit.inner_rect.y),
++            col: x.saturating_sub(hit.inner_rect.x),
++        })
++    }
++
+     fn request_link_hover(&mut self, outcome: &mut ClientShellInput) {
+         if self
+             .pending_requests
+@@ -197,7 +227,7 @@ impl ClientShellState {
+             && self
+                 .link_hover
+                 .as_ref()
+-                .is_some_and(|hover| hover.target == target)
++                .is_some_and(|hover| hover.target == target && !hover.resolved)
+         {
+             let regions = match result {
+                 Ok(crate::api::schema::ResponseResult::PaneLinkResolved { regions })
+@@ -220,6 +250,7 @@ impl ClientShellState {
+                 target,
+                 regions,
+                 resolved: true,
++                local_file: false,
+             });
+         }
+         if !cancelled {
+diff --git a/src/client/shell/state.rs b/src/client/shell/state.rs
+index 5a73292..a63a86a 100644
+--- a/src/client/shell/state.rs
++++ b/src/client/shell/state.rs
+@@ -37,6 +37,7 @@ pub(crate) struct ClientShellConfig {
+     pub(super) palette: Palette,
+     pub(super) keybinds: LiveKeybindConfig,
+     pub(super) local_keys: crate::config::KeysConfig,
++    pub(super) local_file_bindings: Vec<crate::config::CustomCommandKeybind>,
+     pub(super) keybinding_source: ClientShellKeybindingSource,
+     pub(super) prompt_new_tab_name: bool,
+     pub(super) prompt_new_workspace_name: bool,
+@@ -248,6 +249,7 @@ pub(crate) enum ClientShellAction {
+     },
+     ClipboardWrite(Vec<u8>),
+     OpenSafeWebUrl(String),
++    LocalFile(Box<crate::client::local_file_actions::LocalFileInvocation>),
+     ActivateEndpoint {
+         endpoint_id: ClientEndpointId,
+         target: Option<ClientEndpointFocusTarget>,
+@@ -510,6 +512,8 @@ pub(super) struct ClientWorktreeRemoveOverlay {
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(super) enum ClientContextMenuAction {
++    OpenLocalFile,
++    RevealLocalFile,
+     Rename,
+     Close,
+     NewWorktree,
+@@ -547,6 +551,7 @@ pub(super) enum ClientContextMenuTarget {
+         source_pane_id: Option<String>,
+         has_manual_label: bool,
+         right_click_passthrough: bool,
++        local_file: Option<Box<super::local_files::LocalFileMenuTarget>>,
+     },
+ }
+ 
+diff --git a/src/client/shell/tests/mod.rs b/src/client/shell/tests/mod.rs
+index 05bfc26..6b3e108 100644
+--- a/src/client/shell/tests/mod.rs
++++ b/src/client/shell/tests/mod.rs
+@@ -258,6 +258,7 @@ mod input_conformance;
+ mod input_domain;
+ mod keybindings_settings;
+ mod link_hover;
++mod local_files;
+ mod mobile;
+ mod mouse_selection;
+ mod popup_focus_projection;
+diff --git a/src/client/shell/tests/popup_focus_projection.rs b/src/client/shell/tests/popup_focus_projection.rs
+index c9f0227..afc2aba 100644
+--- a/src/client/shell/tests/popup_focus_projection.rs
++++ b/src/client/shell/tests/popup_focus_projection.rs
+@@ -147,6 +147,97 @@ fn non_overlay_ctrl_v_is_forwarded_to_the_focused_pane() {
+     ));
+ }
+ 
++fn local_codex_paste_state() -> ClientShellState {
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    let mut projected = snapshot();
++    projected.agents.push(ClientShellAgent {
++        pane_id: "pane_1".into(),
++        workspace_id: "ws_1".into(),
++        tab_id: "tab_1".into(),
++        name: None,
++        display_agent: None,
++        agent: Some("codex".into()),
++        title: None,
++        terminal_title: None,
++        terminal_title_stripped: None,
++        agent_status: AgentStatus::Idle,
++        state_change_seq: 1,
++        state_labels: Vec::new(),
++        tokens: Vec::new(),
++        focused: true,
++    });
++    state.set_snapshot(Box::new(projected));
++    state
++}
++
++#[test]
++fn local_codex_image_paste_reaches_pane_as_native_ctrl_v() {
++    let mut state = local_codex_paste_state();
++    let mut events = crate::raw_input::parse_framed_input(b"\x1b[200~\x1b[201~");
++    state.translate_local_codex_image_paste(&mut events, true, |pane_id| {
++        assert_eq!(pane_id, "pane_1");
++        true
++    });
++    assert!(matches!(&events[..], [RawInputEvent::Key(key)]
++        if key.code == KeyCode::Char('v') && key.modifiers == KeyModifiers::CONTROL));
++    let converted = state.handle_raw_events(events);
++    let native = state.handle_raw_events(crate::raw_input::parse_framed_input(b"\x16"));
++    assert_eq!(converted.requests, native.requests);
++    assert!(!converted.requests.is_empty());
++}
++
++#[test]
++fn local_codex_image_paste_preserves_text_ctrl_v_and_empty_clipboard() {
++    let state = local_codex_paste_state();
++    for bytes in [b"\x1b[200~hello\nworld\x1b[201~".as_slice(), b"\x16"] {
++        let mut events = crate::raw_input::parse_framed_input(bytes);
++        let before = format!("{events:?}");
++        state.translate_local_codex_image_paste(&mut events, true, |_| {
++            panic!("unexpected clipboard read")
++        });
++        assert_eq!(format!("{events:?}"), before);
++    }
++    let mut events = vec![RawInputEvent::Paste(String::new())];
++    state.translate_local_codex_image_paste(&mut events, true, |_| false);
++    assert!(matches!(&events[..], [RawInputEvent::Paste(text)] if text.is_empty()));
++}
++
++#[test]
++fn local_codex_image_paste_does_not_read_clipboard_for_other_targets() {
++    for case in [
++        "disabled-or-remote",
++        "shell",
++        "other-agent",
++        "other-pane",
++        "prefix",
++        "overlay",
++        "popup",
++        "pending",
++    ] {
++        let mut state = local_codex_paste_state();
++        match case {
++            "shell" => state.set_snapshot(Box::new(snapshot())),
++            "other-agent" => state.snapshot.as_mut().unwrap().agents[0].agent = Some("pi".into()),
++            "other-pane" => {
++                state.snapshot.as_mut().unwrap().focused_pane_id = Some("pane_2".into())
++            }
++            "prefix" => state.mode = ClientShellMode::Prefix,
++            "overlay" => state.overlay = Some(ClientShellOverlay::Onboarding),
++            "popup" => state.set_pane_surface(surface_with_popup()),
++            "pending" => state.popup_pending = true,
++            _ => {}
++        }
++        let mut events = vec![RawInputEvent::Paste(String::new())];
++        state.translate_local_codex_image_paste(&mut events, case != "disabled-or-remote", |_| {
++            panic!("unexpected clipboard read for {case}")
++        });
++        assert!(
++            matches!(&events[..], [RawInputEvent::Paste(text)] if text.is_empty()),
++            "{case}"
++        );
++    }
++}
++
+ #[test]
+ fn desktop_composition_keeps_shell_outside_origin_relative_surface() {
+     let config = ClientShellConfig::from_config(&Config::default());
+diff --git a/src/client/shell_runtime.rs b/src/client/shell_runtime.rs
+index 66a4186..ab82e44 100644
+--- a/src/client/shell_runtime.rs
++++ b/src/client/shell_runtime.rs
+@@ -56,6 +56,15 @@ pub(super) fn dispatch_client_shell_actions(
+                 }
+             }
+             shell::ClientShellAction::ReplayMouse(events) => replay_mouse.extend(events),
++            shell::ClientShellAction::LocalFile(invocation) => {
++                if endpoints.active_id().is_local() && endpoints.active_surface_available() {
++                    if let Err(error) = local_file_actions::invoke(*invocation) {
++                        if let Some(shell) = shell.as_deref_mut() {
++                            repaint |= shell.local_file_action_failed(error);
++                        }
++                    }
++                }
++            }
+             shell::ClientShellAction::Keybind(action) => {
+                 debug!(
+                     ?action,
+diff --git a/src/client/local_file_actions.rs b/src/client/local_file_actions.rs
+new file mode 100644
+index 0000000..d2ae923
+--- /dev/null
++++ b/src/client/local_file_actions.rs
+@@ -0,0 +1,220 @@
++//! Multi-row file clicks use the existing local JSON API. Keep each row's
++//! revision check: a linear selection would include unrelated table columns.
++use std::io::{BufRead, BufReader, Read, Write};
++use std::time::{Duration, Instant};
++
++use interprocess::local_socket::traits::Stream as _;
++
++use crate::api::schema::{
++    Method, PaneSelectionReadParams, PaneTarget, PluginActionInvokeParams, PluginInvocationContext,
++    Request, ResponseResult,
++};
++
++#[derive(Debug)]
++pub(crate) struct LocalFileInvocation {
++    pub workspace_id: String,
++    pub tab_id: String,
++    pub pane_id: String,
++    pub action: &'static str,
++    pub selections: Vec<(PaneSelectionReadParams, String)>,
++}
++
++pub(super) fn invoke(invocation: LocalFileInvocation) -> Result<(), String> {
++    let path = crate::api::client::ApiClient::local().socket_path();
++    let identity = crate::ipc::socket_file_identity(&path).map_err(|e| e.to_string())?;
++    let deadline = Instant::now() + Duration::from_millis(1500);
++    // The JSON API accepts one request per connection. Check socket identity
++    // before sending each request so a restarted server cannot inherit checks.
++    invoke_with(invocation, |method| {
++        let remaining = deadline
++            .checked_duration_since(Instant::now())
++            .ok_or("文件路径核对超时，请重试。")?;
++        let stream = crate::ipc::connect_local_stream(&path).map_err(|e| e.to_string())?;
++        if crate::ipc::socket_file_identity(&path).map_err(|e| e.to_string())? != identity {
++            return Err("Herdr 后台已变化，请重新右键。".into());
++        }
++        let mut reader = BufReader::new(stream);
++        reader
++            .get_ref()
++            .set_send_timeout(Some(remaining))
++            .map_err(|e| e.to_string())?;
++        reader
++            .get_ref()
++            .set_recv_timeout(Some(remaining))
++            .map_err(|e| e.to_string())?;
++        let request = Request {
++            id: "client:local-file".into(),
++            method,
++        };
++        let mut bytes = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
++        bytes.push(b'\n');
++        reader
++            .get_mut()
++            .write_all(&bytes)
++            .map_err(|e| e.to_string())?;
++        let mut reply = String::new();
++        (&mut reader)
++            .take(2 * 1024 * 1024)
++            .read_line(&mut reply)
++            .map_err(|e| e.to_string())?;
++        let value = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
++        crate::api::client::parse_response_value(value)
++            .map(|r| r.result)
++            .map_err(|e| e.to_string())
++    })
++}
++
++fn invoke_with(
++    invocation: LocalFileInvocation,
++    mut rpc: impl FnMut(Method) -> Result<ResponseResult, String>,
++) -> Result<(), String> {
++    let changed = || "路径所在的窗格内容已变化，请重新右键。".to_owned();
++    if invocation.selections.is_empty() || invocation.selections.len() > 8 {
++        return Err(changed());
++    }
++    let target = PaneTarget {
++        pane_id: invocation.pane_id.clone(),
++    };
++    let ResponseResult::PaneInfo { pane: before } = rpc(Method::PaneGet(target.clone()))? else {
++        return Err(changed());
++    };
++    if before.pane_id != invocation.pane_id
++        || before.tab_id != invocation.tab_id
++        || before.workspace_id != invocation.workspace_id
++    {
++        return Err(changed());
++    }
++    let mut path = String::new();
++    for (selection, expected) in invocation.selections {
++        if selection.pane_id != invocation.pane_id || selection.content_revision.is_none() {
++            return Err(changed());
++        }
++        let ResponseResult::PaneSelection { pane_id, text } =
++            rpc(Method::PaneSelectionRead(selection))?
++        else {
++            return Err(changed());
++        };
++        if pane_id != invocation.pane_id || text != expected {
++            return Err(changed());
++        }
++        path.push_str(&text);
++    }
++    if path.len() > 8192 || path.chars().any(char::is_control) {
++        return Err(changed());
++    }
++    let ResponseResult::PaneInfo { pane: after } = rpc(Method::PaneGet(target))? else {
++        return Err(changed());
++    };
++    if before != after {
++        return Err(changed());
++    }
++    let context: PluginInvocationContext = serde_json::from_value(serde_json::json!({
++        "workspace_id": invocation.workspace_id, "tab_id": invocation.tab_id,
++        "focused_pane_id": invocation.pane_id, "selected_text": path,
++        "invocation_source": "local-file-mouse",
++    }))
++    .map_err(|e| e.to_string())?;
++    match rpc(Method::PluginActionInvoke(PluginActionInvokeParams {
++        plugin_id: Some("local.file-actions".into()),
++        action_id: invocation.action.into(),
++        context: Some(context),
++    }))? {
++        ResponseResult::PluginActionInvoked { .. } => Ok(()),
++        _ => Err("文件插件没有接受操作，请重试。".into()),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::api::schema::{PaneInfo, PaneTextPoint};
++
++    #[test]
++    fn wrapped_file_action_validates_every_fragment_and_pane_before_invoking() {
++        for failure in [
++            "none",
++            "changed-text",
++            "stale",
++            "wrong-pane",
++            "new-terminal",
++        ] {
++            let invocation = LocalFileInvocation {
++                workspace_id: "w1".into(),
++                tab_id: "w1:t1".into(),
++                pane_id: "w1:p1".into(),
++                action: "reveal",
++                selections: ["项目 空格/二层", "平面(1).pdf"]
++                    .into_iter()
++                    .enumerate()
++                    .map(|(row, text)| {
++                        (
++                            PaneSelectionReadParams {
++                                pane_id: "w1:p1".into(),
++                                anchor: PaneTextPoint {
++                                    row: row as u32,
++                                    col: 3,
++                                },
++                                cursor: PaneTextPoint {
++                                    row: row as u32,
++                                    col: 15,
++                                },
++                                content_revision: Some(4),
++                            },
++                            text.to_owned(),
++                        )
++                    })
++                    .collect(),
++            };
++            let mut info_reads = 0;
++            let mut selections = 0;
++            let mut invoked = false;
++            let result = invoke_with(invocation, |method| match method {
++                Method::PaneGet(_) => {
++                    info_reads += 1;
++                    let pane: PaneInfo = serde_json::from_value(serde_json::json!({
++                        "pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1", "terminal_id": if failure == "new-terminal" && info_reads == 2 { "new" } else { "original" },
++                        "focused": true, "agent_status": "idle", "revision": 4
++                    })).unwrap();
++                    Ok(ResponseResult::PaneInfo { pane })
++                }
++                Method::PaneSelectionRead(selection) => {
++                    assert_eq!(selection.content_revision, Some(4));
++                    selections += 1;
++                    if failure == "stale" && selections == 2 {
++                        return Err("stale_content".into());
++                    }
++                    Ok(ResponseResult::PaneSelection {
++                        pane_id: if failure == "wrong-pane" {
++                            "w2:p1"
++                        } else {
++                            "w1:p1"
++                        }
++                        .into(),
++                        text: if failure == "changed-text" {
++                            "unrelated.pdf"
++                        } else if selections == 1 {
++                            "项目 空格/二层"
++                        } else {
++                            "平面(1).pdf"
++                        }
++                        .into(),
++                    })
++                }
++                Method::PluginActionInvoke(params) => {
++                    invoked = true;
++                    assert_eq!(params.plugin_id.as_deref(), Some("local.file-actions"));
++                    assert_eq!(params.action_id, "reveal");
++                    let context = params.context.unwrap();
++                    assert_eq!(context.focused_pane_id.as_deref(), Some("w1:p1"));
++                    assert_eq!(
++                        context.selected_text.as_deref(),
++                        Some("项目 空格/二层平面(1).pdf")
++                    );
++                    Err("test-invoked".into())
++                }
++                _ => panic!("unexpected API request"),
++            });
++            assert_eq!(invoked, failure == "none", "{failure}: {result:?}");
++        }
++    }
++}
+diff --git a/src/client/shell/local_files.rs b/src/client/shell/local_files.rs
+new file mode 100644
+index 0000000..26ca763
+--- /dev/null
++++ b/src/client/shell/local_files.rs
+@@ -0,0 +1,564 @@
++//! Mouse access to the optional local.file-actions plugin. Presentation only:
++//! command.invoke reads the actual selection and validates its revision on the
++//! existing server. Hover never touches the filesystem, clipboard or process tree.
++use super::link_hover::LinkHoverTarget;
++use super::*;
++use crate::api::schema::{
++    CommandInvokeParams, Method, PaneLinkRegion, PaneSelectionReadParams, PaneTextPoint,
++};
++use std::ops::Range;
++
++#[derive(Debug)]
++pub(super) struct LocalFileMenuTarget {
++    location: LinkHoverTarget,
++    boot_id: String,
++    selections: Vec<(PaneSelectionReadParams, String)>,
++    pub(super) open_command: Option<String>,
++    pub(super) reveal_command: Option<String>,
++}
++
++impl ClientShellState {
++    pub(crate) fn local_file_action_failed(&mut self, error: String) -> bool {
++        self.push_endpoint_notice(
++            ClientEndpointNoticeKind::Rejected,
++            "local_file_failed",
++            "文件未打开",
++            error,
++        )
++    }
++    fn local_file_actions_available(&self) -> bool {
++        self.active_endpoint_id == ClientEndpointId::Local
++            && !self.config.local_file_bindings.is_empty()
++            && self.endpoint_is_online(&self.active_endpoint_id)
++            && self
++                .endpoints
++                .iter()
++                .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
++                .and_then(|endpoint| endpoint.methods.as_ref())
++                .is_some_and(|methods| methods.iter().any(|name| name == "command.invoke"))
++    }
++
++    fn local_file_command_id(&self, command: &str) -> Option<String> {
++        let binding = self
++            .config
++            .local_file_bindings
++            .iter()
++            .find(|binding| binding.command == command)?;
++        let labels = binding.bindings.labels();
++        let mut candidates = self.snapshot.as_ref()?.commands.iter().filter(|candidate| {
++            candidate.action == crate::protocol::ClientShellCommandAction::PluginAction
++                && candidate.description == binding.description
++                && !labels.is_empty()
++                && labels
++                    .iter()
++                    .all(|label| candidate.binding_labels.contains(label))
++        });
++        let candidate = candidates.next()?;
++        candidates
++            .next()
++            .is_none()
++            .then(|| candidate.command_id.clone())
++    }
++
++    pub(super) fn local_file_regions(&self, target: &LinkHoverTarget) -> Vec<PaneLinkRegion> {
++        self.local_file_match(target)
++            .unwrap_or_default()
++            .into_iter()
++            .map(|(region, _)| region)
++            .collect()
++    }
++
++    fn local_file_match(&self, target: &LinkHoverTarget) -> Option<Vec<(PaneLinkRegion, String)>> {
++        if !self.local_file_actions_available() {
++            return None;
++        }
++        let surface = self.pane_surface.as_ref()?;
++        let rect = target.source_rect;
++        if rect.width == 0
++            || rect.width > 4096
++            || u32::from(rect.x) + u32::from(rect.width) > u32::from(surface.frame.width)
++            || u32::from(rect.y) + u32::from(rect.height) > u32::from(surface.frame.height)
++            || target.row >= rect.height
++            || target.col >= rect.width
++        {
++            return None;
++        }
++        match styled_path(&surface.frame, target) {
++            Ok(Some(segments)) => return Some(segments),
++            Err(()) => return None,
++            Ok(None) => {}
++        }
++        let y = usize::from(rect.y) + usize::from(target.row);
++        if y >= usize::from(surface.frame.height)
++            || usize::from(rect.x) + usize::from(rect.width) > usize::from(surface.frame.width)
++        {
++            return None;
++        }
++        let start = y * usize::from(surface.frame.width) + usize::from(rect.x);
++        let cells = surface
++            .frame
++            .cells
++            .get(start..start + usize::from(rect.width))?;
++        let mut text = String::new();
++        let mut bytes = Vec::<Range<usize>>::with_capacity(cells.len());
++        let mut wide_tail = false;
++        for cell in cells {
++            if wide_tail {
++                bytes.push(bytes.last()?.clone());
++                wide_tail = false;
++                continue;
++            }
++            let start = text.len();
++            text.push_str(if cell.symbol.is_empty() {
++                " "
++            } else {
++                &cell.symbol
++            });
++            if text.len() > 8192 {
++                return None;
++            }
++            bytes.push(start..text.len());
++            wide_tail = cell.symbol.width() == 2;
++        }
++        let range = file_range_at(&text, bytes.get(usize::from(target.col))?.start)?;
++        let first = bytes.iter().position(|b| b.end > range.start)?;
++        let last = bytes.iter().rposition(|b| b.start < range.end)?;
++        // A hidden OSC 8 destination can differ from its label. Command selections
++        // carry visible text, so never interpret an alias as an unrelated local file.
++        for cell in &cells[first..=last] {
++            if let Some(id) = cell.hyperlink {
++                let uri = surface.frame.hyperlinks.get(id as usize)?;
++                let visible = &text[range.clone()];
++                if uri != visible && uri.strip_prefix("file://") != Some(visible) {
++                    return None;
++                }
++            }
++        }
++        Some(vec![(
++            PaneLinkRegion {
++                row: target.row,
++                start_col: first as u16,
++                end_col: last as u16,
++            },
++            text[range].to_owned(),
++        )])
++    }
++
++    pub(super) fn local_file_menu_target(&self, x: u16, y: u16) -> Option<LocalFileMenuTarget> {
++        let location = self.pointer_link_target(x, y)?;
++        if !self.link_hover_target_current(&location)
++            || !location.content_revision.is_multiple_of(2)
++        {
++            return None;
++        }
++        let segments = self.local_file_match(&location)?;
++        let open_command = self.local_file_command_id("local.file-actions.open");
++        let reveal_command = self.local_file_command_id("local.file-actions.reveal");
++        if open_command.is_none() && reveal_command.is_none() {
++            return None;
++        }
++        let hit = self
++            .hits
++            .panes
++            .iter()
++            .find(|hit| hit.pane_id == location.pane_id)?;
++        let selections = segments
++            .into_iter()
++            .map(|(region, text)| {
++                let row = crate::selection::absolute_row_for_viewport(region.row, hit.scroll);
++                (
++                    PaneSelectionReadParams {
++                        pane_id: location.pane_id.clone(),
++                        anchor: PaneTextPoint {
++                            row,
++                            col: region.start_col,
++                        },
++                        cursor: PaneTextPoint {
++                            row,
++                            col: region.end_col,
++                        },
++                        content_revision: Some(location.content_revision),
++                    },
++                    text,
++                )
++            })
++            .collect();
++        Some(LocalFileMenuTarget {
++            location,
++            selections,
++            open_command,
++            reveal_command,
++            boot_id: self.snapshot.as_ref()?.boot_id.clone(),
++        })
++    }
++
++    pub(super) fn activate_local_file(
++        &mut self,
++        file: LocalFileMenuTarget,
++        action: ClientContextMenuAction,
++        outcome: &mut ClientShellInput,
++    ) {
++        if self.active_endpoint_id != ClientEndpointId::Local
++            || self
++                .snapshot
++                .as_ref()
++                .is_none_or(|snapshot| snapshot.boot_id != file.boot_id)
++            || !self.link_hover_target_current(&file.location)
++        {
++            outcome.repaint |= self.push_endpoint_notice(
++                ClientEndpointNoticeKind::Rejected,
++                "file_target_changed",
++                "请重新点击文件",
++                "窗格内容或滚动位置已变化，请在当前文件路径上重新右键。",
++            );
++            return;
++        }
++        let command_id = match action {
++            ClientContextMenuAction::OpenLocalFile => file.open_command,
++            ClientContextMenuAction::RevealLocalFile => file.reveal_command,
++            _ => None,
++        };
++        let Some(command_id) = command_id else {
++            return;
++        };
++        let Some(pane) = self.snapshot.as_ref().and_then(|snapshot| {
++            snapshot
++                .panes
++                .iter()
++                .find(|pane| pane.pane_id == file.location.pane_id)
++        }) else {
++            return;
++        };
++        if file.selections.len() > 1 {
++            outcome.actions.push(ClientShellAction::LocalFile(Box::new(
++                crate::client::local_file_actions::LocalFileInvocation {
++                    workspace_id: pane.workspace_id.clone(),
++                    tab_id: pane.tab_id.clone(),
++                    pane_id: pane.pane_id.clone(),
++                    action: if action == ClientContextMenuAction::OpenLocalFile {
++                        "open"
++                    } else {
++                        "reveal"
++                    },
++                    selections: file.selections,
++                },
++            )));
++            return;
++        }
++        self.push_endpoint_method(
++            Method::CommandInvoke(CommandInvokeParams {
++                command_id,
++                workspace_id: Some(pane.workspace_id.clone()),
++                tab_id: Some(pane.tab_id.clone()),
++                pane_id: Some(pane.pane_id.clone()),
++                selection: file
++                    .selections
++                    .into_iter()
++                    .next()
++                    .map(|(selection, _)| selection),
++            }),
++            outcome,
++        );
++    }
++}
++
++type FileSegments = Vec<(PaneLinkRegion, String)>;
++
++/// Codex renders link destinations as distinct style runs, even when a table
++/// wraps them before the terminal's right edge. Only join a complete, bounded
++/// parenthesized run; table padding and other columns never enter the path.
++fn styled_path(frame: &FrameData, target: &LinkHoverTarget) -> Result<Option<FileSegments>, ()> {
++    let rect = target.source_rect;
++    let row_cells = |row: u16| {
++        let start = usize::from(rect.y + row) * usize::from(frame.width) + usize::from(rect.x);
++        frame.cells.get(start..start + usize::from(rect.width))
++    };
++    let clicked_cells = row_cells(target.row).ok_or(())?;
++    let mut clicked_col = usize::from(target.col);
++    if clicked_col > 0 && clicked_cells[clicked_col - 1].symbol.width() == 2 {
++        clicked_col -= 1;
++    }
++    let style = &clicked_cells[clicked_col];
++    let same_style = |cell: &crate::protocol::CellData| {
++        cell.fg == style.fg && cell.bg == style.bg && cell.modifier == style.modifier
++    };
++    let mut claimed = false;
++    let mut found = None;
++    // At most 8 candidate starts × 8 rows, only on pointer movement; no I/O.
++    for start_row in target.row.saturating_sub(7)..=target.row {
++        let mut segments = Vec::new();
++        let mut closing = None;
++        let mut includes_pointer = false;
++        let mut bytes = 0;
++        for row in start_row..rect.height.min(start_row.saturating_add(8)) {
++            let cells = row_cells(row).ok_or(())?;
++            let mut runs = Vec::new();
++            let mut col = 0;
++            while col < cells.len() {
++                if !same_style(&cells[col]) {
++                    col += 1;
++                    continue;
++                }
++                let first = col;
++                col += cells[col].symbol.width().max(1);
++                while col < cells.len() && same_style(&cells[col]) {
++                    col += cells[col].symbol.width().max(1);
++                }
++                let end = col.min(cells.len());
++                let mut text = String::new();
++                let mut i = first;
++                while i < end {
++                    text.push_str(&cells[i].symbol);
++                    i += cells[i].symbol.width().max(1);
++                }
++                if !text.trim().is_empty() {
++                    runs.push((first, end, text));
++                }
++            }
++            if row == target.row {
++                claimed |= runs.iter().any(|(first, end, text)| {
++                    *first <= clicked_col
++                        && clicked_col < *end
++                        && looks_like_path(text)
++                        && (style.fg != 0
++                            && (*first > 0 || *end < cells.len())
++                            && !(*first > 0
++                                && matches!(cells[first - 1].symbol.as_str(), "`" | "\"" | "'"))
++                            || *first > 0 && matches!(cells[first - 1].symbol.as_str(), "(" | "（")
++                            || cells
++                                .get(*end)
++                                .is_some_and(|cell| matches!(cell.symbol.as_str(), ")" | "）")))
++                });
++            }
++            // Multiple same-style spans could belong to adjacent table columns.
++            let [(first, end, text)] = runs.as_slice() else {
++                break;
++            };
++            let before = if *first == 0 {
++                None
++            } else {
++                Some(cells[first - 1].symbol.as_str())
++            };
++            let after = cells.get(*end).map(|cell| cell.symbol.as_str());
++            if row == start_row {
++                closing = match before {
++                    Some("(") => Some(")"),
++                    Some("（") => Some("）"),
++                    _ => None,
++                };
++                if closing.is_none() {
++                    break;
++                }
++            } else if cells[..*first]
++                .iter()
++                .any(|cell| !cell.symbol.trim().is_empty())
++            {
++                break;
++            }
++            includes_pointer |= row == target.row && *first <= clicked_col && clicked_col < *end;
++            claimed |= includes_pointer;
++            if cells[*first..*end]
++                .iter()
++                .any(|cell| cell.hyperlink.is_some())
++            {
++                break;
++            }
++            bytes += text.len();
++            if bytes > 8192 {
++                break;
++            }
++            segments.push((
++                PaneLinkRegion {
++                    row,
++                    start_col: *first as u16,
++                    end_col: (end - 1) as u16,
++                },
++                text.clone(),
++            ));
++            if after == closing {
++                let path: String = segments.iter().map(|(_, text)| text.as_str()).collect();
++                if includes_pointer && looks_like_path(&path) {
++                    if found.is_some() {
++                        return Err(());
++                    }
++                    found = Some(segments);
++                }
++                break;
++            }
++            // Continuations may end before padded table columns, but not in prose.
++            if after.is_some_and(|s| !s.trim().is_empty()) {
++                break;
++            }
++        }
++    }
++    if found.is_none() && claimed {
++        Err(())
++    } else {
++        Ok(found)
++    }
++}
++
++fn looks_like_path(text: &str) -> bool {
++    if text.is_empty()
++        || text.chars().any(char::is_control)
++        || text.contains("://") && !text.starts_with("file://")
++    {
++        return false;
++    }
++    if text.starts_with("file://") || text.starts_with('/') || text.contains('/') {
++        return text != "/";
++    }
++    let filename = text.split([':', '#']).next().unwrap_or(text);
++    filename.rsplit_once('.').is_some_and(|(stem, ext)| {
++        !stem.is_empty()
++            && !ext.is_empty()
++            && ext.len() <= 12
++            && ext.chars().all(char::is_alphanumeric)
++    })
++}
++
++fn file_range_at(text: &str, byte: usize) -> Option<Range<usize>> {
++    if byte >= text.len() {
++        return None;
++    }
++    // Quoting disambiguates whitespace inside filenames. Bound scanning to this row.
++    let mut quote = None;
++    for (index, ch) in text.char_indices() {
++        match quote {
++            Some((opening, start)) if ch == opening => {
++                if start <= byte && byte < index {
++                    return looks_like_path(&text[start..index]).then_some(start..index);
++                }
++                quote = None;
++            }
++            None if matches!(ch, '`' | '\'' | '"') => quote = Some((ch, index + ch.len_utf8())),
++            _ => {}
++        }
++    }
++    // Rendered Markdown links use outer parentheses; filenames may contain (1).
++    let mut openings = Vec::new();
++    let mut enclosed = None;
++    for (index, ch) in text.char_indices() {
++        if matches!(ch, '(' | '（') {
++            let container = index == 0
++                || text[..index].chars().next_back().is_some_and(|before| {
++                    before.is_whitespace() || matches!(before, ']' | ':' | '：')
++                });
++            openings.push((index + ch.len_utf8(), ch, container));
++        }
++        if matches!(ch, ')' | '）') {
++            if let Some((start, opening, container)) = openings.pop() {
++                if container
++                    && (opening == '(' && ch == ')' || opening == '（' && ch == '）')
++                    && start <= byte
++                    && byte < index
++                    && looks_like_path(&text[start..index])
++                {
++                    enclosed = Some(start..index);
++                }
++            }
++        }
++    }
++    if enclosed.is_some() {
++        return enclosed;
++    }
++    let boundary = |ch: char| {
++        ch.is_whitespace()
++            || matches!(
++                ch,
++                '`' | '\''
++                    | '"'
++                    | '<'
++                    | '>'
++                    | '['
++                    | ']'
++                    | '('
++                    | ')'
++                    | '|'
++                    | ','
++                    | ';'
++                    | '，'
++                    | '。'
++                    | '；'
++                    | '：'
++                    | '“'
++                    | '”'
++                    | '（'
++                    | '）'
++            )
++    };
++    let mut start = 0;
++    let mut inner_parentheses = 0;
++    for (index, ch) in text
++        .char_indices()
++        .chain(std::iter::once((text.len(), ' ')))
++    {
++        if ch == '(' && start < index {
++            inner_parentheses += 1;
++            continue;
++        }
++        if ch == ')' && inner_parentheses > 0 {
++            inner_parentheses -= 1;
++            continue;
++        }
++        if boundary(ch) {
++            if start <= byte && byte < index {
++                let candidate = text[start..index].trim_end_matches(['.', ':']);
++                let end = start + candidate.len();
++                return (byte < end && looks_like_path(candidate)).then_some(start..end);
++            }
++            start = index + ch.len_utf8();
++            inner_parentheses = 0;
++        }
++    }
++    None
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn local_file_tokens_handle_quotes_markdown_line_numbers_and_web_exclusion() {
++        for (text, token, expected) in [
++            ("read docs/说明.md:12 now", "说明", Some("docs/说明.md:12")),
++            (
++                "read `docs/my file.md` now",
++                "file",
++                Some("docs/my file.md"),
++            ),
++            ("[title](docs/a.md#L2)", "a.md", Some("docs/a.md#L2")),
++            (
++                "布局图 (0701 项目/资料/Layout-APPROVED(1).pdf)，说明",
++                "0701",
++                Some("0701 项目/资料/Layout-APPROVED(1).pdf"),
++            ),
++            ("see README.md.", "README", Some("README.md")),
++            (
++                "read \"docs/report(v1.0).pdf\" now",
++                "v1.0",
++                Some("docs/report(v1.0).pdf"),
++            ),
++            (
++                "read docs/report(v1.0).pdf now",
++                "v1.0",
++                Some("docs/report(v1.0).pdf"),
++            ),
++            (
++                "read (docs/report(v1.0).pdf) now",
++                "v1.0",
++                Some("docs/report(v1.0).pdf"),
++            ),
++            (
++                "file:///tmp/a%20b.txt",
++                "a%20",
++                Some("file:///tmp/a%20b.txt"),
++            ),
++            ("https://example.com/a.md", "a.md", None),
++            ("just words", "words", None),
++        ] {
++            let found = file_range_at(text, text.find(token).unwrap()).map(|range| &text[range]);
++            assert_eq!(found, expected, "{text}");
++        }
++    }
++}
+diff --git a/src/client/shell/tests/local_files.rs b/src/client/shell/tests/local_files.rs
+new file mode 100644
+index 0000000..6275bd1
+--- /dev/null
++++ b/src/client/shell/tests/local_files.rs
+@@ -0,0 +1,396 @@
++use super::*;
++
++fn file_state(text: &str) -> ClientShellState {
++    let mut config = Config::default();
++    for (key, action) in [("prefix+f", "open"), ("prefix+d", "reveal")] {
++        config
++            .keys
++            .command
++            .push(crate::config::CommandKeybindConfig {
++                key: crate::config::BindingConfig::one(key),
++                command: format!("local.file-actions.{action}"),
++                action_type: crate::config::CommandKeybindType::PluginAction,
++                ..Default::default()
++            });
++    }
++    let commands = config
++        .keybinds()
++        .custom_commands
++        .iter()
++        .enumerate()
++        .map(|(i, binding)| crate::protocol::ClientShellCommand {
++            command_id: format!("cmd_file_{i}"),
++            binding_label: binding.label.clone(),
++            binding_labels: binding.bindings.labels(),
++            action: crate::protocol::ClientShellCommandAction::PluginAction,
++            description: binding.description.clone(),
++        })
++        .collect();
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
++    let mut snap = snapshot();
++    snap.commands = commands;
++    state.set_snapshot(Box::new(snap));
++    state.set_endpoint_methods(Some(vec!["command.invoke".into()]));
++    let mut next = surface();
++    let buffer = Buffer::with_lines([text, ""]);
++    next.frame = FrameData::from_ratatui_buffer(&buffer, None);
++    next.panes[0].inner_rect.width = next.frame.width;
++    next.panes[0].rect.width = next.frame.width;
++    state.set_pane_surface(next);
++    state.compose(106, 24).unwrap();
++    state
++}
++
++fn file_mouse(state: &ClientShellState, col: u16, kind: MouseEventKind) -> MouseEvent {
++    let pane = &state.hits.panes[0];
++    MouseEvent {
++        kind,
++        column: pane.inner_rect.x + col,
++        row: pane.inner_rect.y,
++        modifiers: KeyModifiers::empty(),
++    }
++}
++
++fn wrapped_file_state() -> ClientShellState {
++    use ratatui::text::{Line, Span};
++    let mut state = file_state("placeholder");
++    let path_style = Style::default().fg(ratatui::style::Color::Green);
++    let lines = vec![
++        Line::from(vec![
++            Span::raw("drawings ("),
++            Span::styled("0701 项目/建筑图/二层", path_style),
++            Span::raw("    DWG    other column"),
++        ]),
++        Line::from(vec![
++            Span::raw("  "),
++            Span::styled("平面图(1).dwg", path_style),
++            Span::raw(")    unrelated text"),
++        ]),
++    ];
++    let buffer = Buffer::with_lines(lines);
++    let mut frame = surface();
++    frame.frame = FrameData::from_ratatui_buffer(&buffer, None);
++    frame.panes[0].inner_rect.width = frame.frame.width;
++    frame.panes[0].rect.width = frame.frame.width;
++    state.set_pane_surface(frame);
++    state.compose(106, 24).unwrap();
++    state
++}
++
++#[test]
++fn mouse_file_hover_covers_both_table_path_segments_without_other_columns() {
++    for row in [0, 1] {
++        let mut state = wrapped_file_state();
++        let mut mouse = file_mouse(&state, if row == 0 { 15 } else { 4 }, MouseEventKind::Moved);
++        mouse.row += row;
++        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
++        let regions = &state.link_hover.as_ref().expect("full path hover").regions;
++        assert_eq!(regions.len(), 2);
++        assert_eq!(
++            (regions[0].row, regions[0].start_col, regions[0].end_col),
++            (0, 10, 30)
++        );
++        assert_eq!(
++            (regions[1].row, regions[1].start_col, regions[1].end_col),
++            (1, 2, 14)
++        );
++    }
++}
++
++#[test]
++fn mouse_file_wrapped_menu_passes_only_exact_path_segments() {
++    for row in [0, 1] {
++        let mut state = wrapped_file_state();
++        let mut mouse = file_mouse(
++            &state,
++            if row == 0 { 15 } else { 4 },
++            MouseEventKind::Down(MouseButton::Right),
++        );
++        mouse.row += row;
++        let menu = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
++        assert!(menu.actions.is_empty());
++        state.compose(106, 24).unwrap();
++        let action = click_file_action(&mut state, "在 Finder 中显示");
++        let [ClientShellAction::LocalFile(invocation)] = &action.actions[..] else {
++            panic!("expected checked local action");
++        };
++        assert_eq!(invocation.action, "reveal");
++        assert_eq!(invocation.pane_id, "pane_1");
++        assert_eq!(
++            invocation
++                .selections
++                .iter()
++                .map(|(_, text)| text.as_str())
++                .collect::<String>(),
++            "0701 项目/建筑图/二层平面图(1).dwg"
++        );
++        assert!(invocation
++            .selections
++            .iter()
++            .all(|(selection, _)| selection.content_revision == Some(0)));
++    }
++}
++
++#[test]
++fn mouse_file_incomplete_wrapped_path_never_falls_back_to_a_fragment() {
++    for row in [0, 1] {
++        let mut state = wrapped_file_state();
++        let mut next = state.pane_surface.as_ref().unwrap().clone();
++        let close = usize::from(next.frame.width) + 15;
++        next.frame.cells[close].symbol = " ".into();
++        next.surface_revision += 1;
++        state.set_pane_surface(next);
++        let mut mouse = file_mouse(&state, if row == 0 { 15 } else { 4 }, MouseEventKind::Moved);
++        mouse.row += row;
++        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
++        assert!(state.link_hover.is_none(), "incomplete row {row}");
++    }
++}
++
++fn open_file_menu(state: &mut ClientShellState, col: u16) {
++    let mouse = file_mouse(state, col, MouseEventKind::Down(MouseButton::Right));
++    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
++    assert!(
++        outcome.actions.is_empty(),
++        "opening the menu has no side effects"
++    );
++    state.compose(106, 24).unwrap();
++}
++
++fn click_file_action(state: &mut ClientShellState, label: &str) -> ClientShellInput {
++    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
++        panic!("expected file context menu");
++    };
++    let index = menu
++        .items()
++        .iter()
++        .position(|item| item.label == label)
++        .expect("file action must be available directly in the mouse menu");
++    let rect = state.hits.context_menu_rows[index].0;
++    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
++        kind: MouseEventKind::Down(MouseButton::Left),
++        column: rect.x + 1,
++        row: rect.y,
++        modifiers: KeyModifiers::empty(),
++    })])
++}
++
++#[test]
++fn mouse_file_menu_invokes_open_and_reveal_without_copy_or_keys() {
++    for (label, action) in [
++        ("打开文件", "cmd_file_0"),
++        ("在 Finder 中显示", "cmd_file_1"),
++    ] {
++        let mut state = file_state("查看 `01_tools/中文 文件.md:12` 后继续");
++        open_file_menu(&mut state, 17);
++        let outcome = click_file_action(&mut state, label);
++        let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
++            panic!("expected one plugin request");
++        };
++        let crate::api::schema::Method::CommandInvoke(params) = &request.method else {
++            panic!("must reuse the existing command API");
++        };
++        assert_eq!(params.command_id, action);
++        assert_eq!(params.pane_id.as_deref(), Some("pane_1"));
++        assert_eq!(params.workspace_id.as_deref(), Some("ws_1"));
++        assert_eq!(params.tab_id.as_deref(), Some("tab_1"));
++        let selection = params.selection.as_ref().unwrap();
++        assert_eq!(selection.pane_id, "pane_1");
++        assert_eq!(selection.anchor.row, 0);
++        assert_eq!((selection.anchor.col, selection.cursor.col), (6, 29));
++        assert_eq!(selection.content_revision, Some(0));
++        assert!(
++            outcome.requests.is_empty(),
++            "mouse action must not type into Codex"
++        );
++    }
++}
++
++#[test]
++fn mouse_file_hover_is_local_and_requires_no_modifier() {
++    let mut state = file_state("see docs/说明.md next");
++    let mouse = file_mouse(&state, 10, MouseEventKind::Moved);
++    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
++    assert!(
++        outcome.actions.is_empty(),
++        "hover must not call a plugin or server"
++    );
++    let frame = state.compose(106, 24).unwrap();
++    let pane = &state.hits.panes[0];
++    let underlined = |col: u16| {
++        frame.cells[usize::from(pane.inner_rect.y) * usize::from(frame.width)
++            + usize::from(pane.inner_rect.x + col)]
++        .modifier
++            & Modifier::UNDERLINED.bits()
++            != 0
++    };
++    assert!(underlined(4));
++    assert!(
++        underlined(10),
++        "wide-cell spacer belongs to the Chinese filename"
++    );
++    assert!(!underlined(3));
++    assert!(!underlined(16));
++    let moved = file_mouse(&state, 12, MouseEventKind::Moved);
++    let repeated = state.handle_raw_events(vec![RawInputEvent::Mouse(moved)]);
++    assert!(
++        !repeated.repaint,
++        "moving within the same path should reuse its underline"
++    );
++    assert!(repeated.actions.is_empty());
++}
++
++#[test]
++fn mouse_file_hover_ignores_a_late_web_hover_reply() {
++    let mut state = file_state("docs/one.md");
++    state.set_endpoint_methods(Some(vec![
++        "command.invoke".into(),
++        "pane.link.resolve".into(),
++    ]));
++    let mouse = file_mouse(&state, 2, MouseEventKind::Moved);
++    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
++        modifiers: KeyModifiers::CONTROL,
++        ..mouse
++    })]);
++    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
++        panic!()
++    };
++    state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
++    assert!(!state.link_hover.as_ref().unwrap().regions.is_empty());
++    state.handle_endpoint_result(
++        "boot-1",
++        &request.id,
++        Ok(crate::api::schema::ResponseResult::PaneLinkResolved { regions: vec![] }),
++    );
++    assert!(!state.link_hover.as_ref().unwrap().regions.is_empty());
++}
++
++#[test]
++fn mouse_file_menu_rejects_content_that_changed_while_menu_was_open() {
++    let mut state = file_state("docs/one.md");
++    open_file_menu(&mut state, 2);
++    let mut changed = state.pane_surface.as_ref().unwrap().clone();
++    changed.surface_revision += 1;
++    changed.panes[0].content_revision += 2;
++    state.set_pane_surface(changed);
++    let outcome = click_file_action(&mut state, "打开文件");
++    assert!(outcome.actions.is_empty());
++    assert!(
++        state.visible_endpoint_notice.is_some(),
++        "ask user to click the current path again"
++    );
++}
++
++#[test]
++fn mouse_file_menu_has_no_file_actions_for_web_urls_or_unsupported_servers() {
++    for (text, supported) in [
++        ("https://example.com/docs/a.md", true),
++        ("docs/a.md", false),
++    ] {
++        let mut state = file_state(text);
++        if !supported {
++            state.set_endpoint_methods(Some(vec![]));
++        }
++        open_file_menu(&mut state, 5);
++        let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
++            panic!()
++        };
++        assert!(menu.items().iter().all(|item| item.label != "打开文件"));
++        assert!(menu.items().iter().any(|item| item.label == "Split right"));
++    }
++}
++
++#[test]
++fn mouse_file_menu_targets_the_clicked_pane_despite_another_focus() {
++    let mut state = file_state("docs/one.md");
++    let mut snap = snapshot();
++    snap.commands = state.snapshot.as_ref().unwrap().commands.clone();
++    let mut other = snap.panes[0].clone();
++    other.pane_id = "other-pane".into();
++    other.workspace_id = "other-workspace".into();
++    other.tab_id = "other-tab".into();
++    snap.panes.push(other);
++    snap.focused_pane_id = Some("other-pane".into());
++    state.set_snapshot(Box::new(snap));
++    state.compose(106, 24).unwrap();
++    open_file_menu(&mut state, 3);
++    let outcome = click_file_action(&mut state, "在 Finder 中显示");
++    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
++        panic!()
++    };
++    let crate::api::schema::Method::CommandInvoke(params) = &request.method else {
++        panic!()
++    };
++    assert_eq!(params.pane_id.as_deref(), Some("pane_1"));
++    assert_eq!(params.workspace_id.as_deref(), Some("ws_1"));
++}
++
++#[test]
++fn mouse_file_menu_does_not_guess_an_osc8_alias_destination() {
++    let mut state = file_state("other.md");
++    let mut next = state.pane_surface.as_ref().unwrap().clone();
++    next.frame
++        .hyperlinks
++        .push("file:///another/project/actual.md".into());
++    for cell in &mut next.frame.cells {
++        cell.hyperlink = Some(0);
++    }
++    next.surface_revision += 1;
++    state.set_pane_surface(next);
++    open_file_menu(&mut state, 2);
++    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
++        panic!()
++    };
++    assert!(menu.items().iter().all(|item| item.label != "打开文件"));
++}
++
++#[test]
++fn mouse_file_left_drag_still_selects_without_opening() {
++    let mut state = file_state("docs/one.md");
++    let down = file_mouse(&state, 1, MouseEventKind::Down(MouseButton::Left));
++    state.handle_raw_events(vec![RawInputEvent::Mouse(down)]);
++    let drag = file_mouse(&state, 6, MouseEventKind::Drag(MouseButton::Left));
++    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(drag)]);
++    assert!(state
++        .selection
++        .as_ref()
++        .is_some_and(crate::selection::Selection::is_visible));
++    assert!(outcome.actions.iter().all(|action| !matches!(action,
++        ClientShellAction::Endpoint { request, .. } if matches!(request.method, crate::api::schema::Method::CommandInvoke(_)))));
++}
++
++#[test]
++fn mouse_file_menu_reads_the_scrolled_history_row_and_rejects_a_scroll_race() {
++    for scroll_after_open in [false, true] {
++        let mut state = file_state("docs/one.md");
++        let mut next = state.pane_surface.as_ref().unwrap().clone();
++        next.surface_revision += 1;
++        next.panes[0].scroll = Some(crate::protocol::PaneSurfaceScrollMetrics {
++            offset_from_bottom: 20,
++            max_offset_from_bottom: 100,
++            viewport_rows: 2,
++        });
++        state.set_pane_surface(next);
++        state.compose(106, 24).unwrap();
++        open_file_menu(&mut state, 3);
++        if scroll_after_open {
++            let mut next = state.pane_surface.as_ref().unwrap().clone();
++            next.surface_revision += 1;
++            next.panes[0].scroll.as_mut().unwrap().offset_from_bottom += 1;
++            state.set_pane_surface(next);
++        }
++        let outcome = click_file_action(&mut state, "打开文件");
++        if scroll_after_open {
++            assert!(outcome.actions.is_empty());
++            assert!(state.visible_endpoint_notice.is_some());
++        } else {
++            let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
++                panic!()
++            };
++            let crate::api::schema::Method::CommandInvoke(params) = &request.method else {
++                panic!()
++            };
++            assert_eq!(params.selection.as_ref().unwrap().anchor.row, 80);
++        }
++    }
++}

@@ -200,6 +200,10 @@ Attach（附着）是连接到现有后台现场；Detach（分离）是当前�
 
 连接正常后再关闭手机 Wi-Fi，用蜂窝网络回到同一个工作区，发送一条消息。Mac 必须保持开机、联网，并按需求设置供电和睡眠策略；锁屏与整机睡眠不同，Mac 睡眠时不能保证远程可用。
 
+### 8.1 控制面超时并不等于软件配置错误
+
+`Running` 不一定代表 Tailscale 在线；控制面不可达时先检查 `Self.Online` 和 `Health`。网络故障也可能伴随“退登”或“注册状态未更改”，这时不要先清身份或重建 Host。已有案例最终确认是办公室网络问题，兼容设置/代理只用于绕行。按[网络排障](network-troubleshooting.zh-CN.md)做单变量对照。
+
 ## 9. 弱网时可选 Mosh
 
 Mosh（Mobile Shell）会先用 SSH 登录，然后让终端交互走 UDP（User Datagram Protocol，用户数据报协议），适合 Wi-Fi/蜂窝切换和不稳定网络。它改善的是连接体验；Herdr 仍负责保留工作现场。
@@ -270,3 +274,12 @@ Herdr 本身是较轻的管理层，但终端缓冲、多个客户端和持续�
 临时离开用分离；真正结束任务才退出 Codex。保留清楚的项目与任务名称，比常驻打开全部历史更容易在手机上管理。
 
 相关入口：[方式比较](options.zh-CN.md)、[排查与卸载](troubleshooting.zh-CN.md)、[Agent 配置提示词](../prompts/setup.zh-CN.md)。
+
+
+## 14. 按需增加便利功能
+
+- 旧对话隔夜消失，终端发消息后才回来：先核实原窗格和登记，按[旧对话恢复](session-restore.zh-CN.md)预览、备份后应用。
+- Mac 打开文件或在 Finder 中显示：[文件操作插件](../plugins/local-files/README.md)。想直接用鼠标或 Command+V 粘贴图片，再配置[固定版本显示端补丁](desktop-client.zh-CN.md)。
+- 客户端积累、重复提示音、自定义声音：[连接与通知管理](connections-notifications.zh-CN.md)。个人单连接管理和前台通知策略需按实际设备配置，不是通用默认值。
+
+这些扩展均不是手机继续旧对话的前置条件；已有官方功能正常时直接使用即可。配置目录、隐私、版本和真实手机验收仍沿用前文要求。

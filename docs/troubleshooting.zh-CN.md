@@ -36,6 +36,8 @@
 
 `/new` 或 `/resume` 后先核对终端，再用正常消息触发更新。气泡仍指向旧内容时，不要继续在那个未确认的输入框发任务。
 
+如果是隔夜或 Codex 自动升级后，原窗格仍运行但 Redock 登记停在 `ended`，见[旧对话登记自动恢复](session-restore.zh-CN.md)。该工具只恢复已核验的既有登记，避免每天为读取历史发送测试消息。
+
 ## 可选兼容工具
 
 工具用途是给现有官方 Redock Hook 补充正确的 Herdr 窗格信息，以及固定正确的历史读取目录。它不安装官方产品，不创建 SSH 账号，不替用户登录，不管理代理，也不改 Codex 权限。
@@ -114,3 +116,19 @@ python3 scripts/redock_codex.py uninstall --apply
 Herdr 后台、每个显示客户端和每个 Codex 任务是不同对象。多个 Mosh/Herdr 客户端可以同时显示一个任务，不等于创建多个模型对话；但会增加连接和画面同步开销。先列出来源并确认哪些已不用，再定向清理，不使用 `pkill codex` 或批量杀所有 mosh-server。
 
 Mac 睡眠、重启、Herdr 服务器停止会改变可用性。分离保留进程；服务重启后的布局恢复与 Codex 历史恢复不是原进程无损存活。保留重要结果，升级与重启安排在任务适合暂停时。
+
+## 进入 Herdr 后相对文件路径不能点击
+
+Herdr 0.9.5 的原生裸文本扫描识别 HTTP(S) 网页链接，本地相对路径没有对应默认打开动作。外层终端原有的 Codex 文件链接适配可能依赖直接子进程及其目录；进入 Herdr 后，Codex 属于 Herdr 后台，不能假定原适配仍有效。开启鼠标捕获时，显式 OSC 8 链接也优先由 Herdr/插件处理；关掉捕获会失去 Herdr 鼠标切窗，不能当作无代价修复。
+
+Mac 可用本仓库的[可选文件操作插件](../plugins/local-files/README.md)：复制完整路径，再用两个快捷键分别打开或在 Finder 中显示。它补的是选择后的操作，不是原生 Command+点击；Codex 的相对目录必须能唯一确认，不能猜测另一个项目中的同名文件。
+
+
+## 鼠标文件菜单与 Command+V 图片
+
+上述插件提供复制路径后的快捷键。如果需要直接悬停、右键，或本地 Codex 的 Command+V 图片粘贴，见[Herdr 显示端补丁](desktop-client.zh-CN.md)。它有固定上游基线和默认本地 Session 限制，不能仅靠重载配置生效。
+
+## 控制面超时、重复客户端与通知
+
+- `fetch control key` 或“注册状态未更改”：先看[网络排障](network-troubleshooting.zh-CN.md)，不把网络超时当作身份过期。
+- 客户端数量增长、电脑重复发声或要自定义 MP3：看[连接与通知管理](connections-notifications.zh-CN.md)，区分显示连接与任务、Mac 声音与手机推送。

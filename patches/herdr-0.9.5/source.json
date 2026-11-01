@@ -1,0 +1,23 @@
+{
+  "upstream": "https://github.com/herdrdev/herdr",
+  "base_commit": "2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01",
+  "version": "0.9.5",
+  "scope": "macOS local display client; default local session; original server unchanged",
+  "patch_sha256": "a1ae1e4c6b4698103bbb8c7775ca3e3a724100a66a9e046aff7e9e082879fe17",
+  "modified_paths": [
+    "src/client/clipboard_images.rs",
+    "src/client/mod.rs",
+    "src/client/shell.rs",
+    "src/client/shell/config.rs",
+    "src/client/shell/context_menu.rs",
+    "src/client/shell/input.rs",
+    "src/client/shell/link_hover.rs",
+    "src/client/shell/state.rs",
+    "src/client/shell/tests/mod.rs",
+    "src/client/shell/tests/popup_focus_projection.rs",
+    "src/client/shell_runtime.rs",
+    "src/client/local_file_actions.rs",
+    "src/client/shell/local_files.rs",
+    "src/client/shell/tests/local_files.rs"
+  ]
+}

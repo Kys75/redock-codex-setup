@@ -1,0 +1,18 @@
+id = "local.file-actions"
+name = "Local file actions"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Open or reveal a selected/copied path from the current pane on macOS"
+platforms = ["macos"]
+
+[[actions]]
+id = "open"
+title = "打开文件"
+contexts = ["pane"]
+command = ["python3", "file_actions.py", "open"]
+
+[[actions]]
+id = "reveal"
+title = "在 Finder 中显示"
+contexts = ["pane"]
+command = ["python3", "file_actions.py", "reveal"]

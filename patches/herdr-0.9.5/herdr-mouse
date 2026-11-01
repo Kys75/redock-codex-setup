@@ -1,0 +1,32 @@
+#!/bin/sh
+# Community local display client. Attach only; never start a Herdr server.
+set -eu
+client_path="$HOME/.local/share/herdr-local/0.9.5-redock-v0.2.0/herdr"
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\n' 'Herdr 0.9.5 community display patch · redock-codex-setup v0.2.0'
+    exit 0
+fi
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'Usage: herdr-mouse (Mac local default session only)' >&2
+    exit 2
+fi
+if [ "$(uname -s)" != Darwin ]; then
+    printf '%s\n' 'This launcher supports macOS only.' >&2
+    exit 1
+fi
+if [ -n "${SSH_CONNECTION-}${SSH_CLIENT-}${SSH_TTY-}${MOSH_IP-}${MOSH_CONNECTION-}" ]; then
+    printf '%s\n' 'Run this launcher in a local Mac terminal, not SSH/Mosh.' >&2
+    exit 1
+fi
+if [ ! -x "$client_path" ]; then
+    printf '%s\n' 'Build and install the community client first; see docs/desktop-client.zh-CN.md.' >&2
+    exit 1
+fi
+if [ ! -S "$HOME/.config/herdr/herdr-client.sock" ]; then
+    printf '%s\n' 'Start the official default Herdr session and detach before using this client.' >&2
+    exit 1
+fi
+exec /usr/bin/env -u HERDR_SESSION -u HERDR_CLIENT_SOCKET_PATH \
+    HERDR_SOCKET_PATH="$HOME/.config/herdr/herdr.sock" \
+    HERDR_CONFIG_PATH="$HOME/.config/herdr/config.toml" \
+    HERDR_LOCAL_IMAGE_PASTE=1 "$client_path" client
