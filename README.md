@@ -12,6 +12,7 @@
 - **已经能连，但旧对话锁定、气泡读错或不更新**：看[排查与兼容工具](docs/troubleshooting.zh-CN.md)。
 - **后台自动升级后，原对话要发消息才重新出现**：看[旧对话登记自动恢复](docs/session-restore.zh-CN.md)，只修复经过实时核验的已有登记。
 - **Mac 文件路径打开／Finder、鼠标菜单和图片粘贴**：先配置[文件操作插件](plugins/local-files/README.md)，需要鼠标菜单或 Command+V 图片粘贴时，再看[可复现的 Herdr 显示端补丁](docs/desktop-client.zh-CN.md)。
+- **在 Mac 查看其他电脑的文件**：为统一侧栏中的 macOS／Linux SSH 机器配置[远端文件读取组件](plugins/remote-files/README.md)，右键路径获取本地副本。
 - **重复客户端、提示音和通知**：看[连接与通知管理](docs/connections-notifications.zh-CN.md)，按自己的设备决定保留策略。
 - **Tailscale 控制面不可达**：先按[网络排障](docs/network-troubleshooting.zh-CN.md)区分网络、身份与 SSH，避免无故重装。
 

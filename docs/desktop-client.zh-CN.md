@@ -6,16 +6,16 @@
 - 识别中文、带引号的空格路径、文件名内部括号，以及满足条件的完整跨行路径。
 - 本地 Codex 输入区中，将终端发送的“空粘贴”在剪贴板有图片时转换为 Control+V，从而支持已验证终端的 Command+V 图片粘贴。
 
-文件操作依赖[文件操作插件](../plugins/local-files/README.md)。它核实当前对话目录；鼠标菜单在此基础上提供入口。只在本机 Mac 操作文件，不把文件发送到手机。
+本机文件操作依赖[文件操作插件](../plugins/local-files/README.md)。它核实当前对话目录；鼠标菜单在此基础上提供入口。v0.3.0 还支持在同一 Mac 界面右键查看已登记 SSH 机器上的文件：安装[远端文件读取组件](../plugins/remote-files/README.md)，即可下载副本并打开或在 Finder 中显示。手机继续使用 Redock 自身的文件入口。
 
 ## 支持范围
 
 | 项目 | 范围 |
 |---|---|
 | 上游基线 | Herdr v0.9.5，提交 `2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01` |
-| 当前验证 | Apple Silicon macOS、本地默认 Session、官方 0.9.5 后台 |
+| 当前验证 | Apple Silicon macOS、本地默认 Session 与统一侧栏的 macOS／Linux SSH 机器、官方 0.9.5 后台 |
 | 保持不变 | 官方 Herdr 可执行文件、后台协议、Codex 任务和手机入口 |
-| 尚未验证 | Intel Mac 构建、其他 Herdr 版本、命名 Session、远端客户端 |
+| 尚未验证 | Intel Mac 构建、其他 Herdr 版本、Windows 远端、手机上的自定义菜单 |
 
 补丁仅修改显示端；不能认为任意新版后台都与此版本兼容。官方升级后应先重新验证，不能直接覆盖新源码或替换正在运行的后台。
 
@@ -51,8 +51,8 @@ export SDKROOT="$DEVELOPER_DIR/SDKs/MacOSX.sdk"
 2. 将刚构建的显示端与独立启动器安装到用户目录；若目标已有同名文件，先将旧文件复制到仓库外作为备份，不覆盖正在使用的版本。
 
    ```bash
-   mkdir -p "$HOME/.local/share/herdr-local/0.9.5-redock-v0.2.0" "$HOME/.local/bin"
-   install -m 755 "$herdr_source/target/release/herdr" "$HOME/.local/share/herdr-local/0.9.5-redock-v0.2.0/herdr"
+   mkdir -p "$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.0" "$HOME/.local/bin"
+   install -m 755 "$herdr_source/target/release/herdr" "$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.0/herdr"
    install -m 755 "$setup_repo/patches/herdr-0.9.5/herdr-mouse" "$HOME/.local/bin/herdr-mouse"
    ```
 
@@ -71,11 +71,19 @@ export SDKROOT="$DEVELOPER_DIR/SDKs/MacOSX.sdk"
 - 图片：在 Mac 复制图片后点击 Codex 输入区，按 Command+V；发送前确认附件标记。Control+V 仍可用。补丁只处理终端实际发来的空 bracketed paste，不能把所有外层终端的 Command+V 都变成通用图片粘贴。
 - 图片适配通过 `HERDR_LOCAL_IMAGE_PASTE=1` 显式启用，仅限本地端点、真实前台 Codex 和有图片的本地剪贴板；SSH/Mosh 环境排除在外。手机继续用 Redock 自己的附件入口。
 
+## 远端文件
+
+在当前 Mac 的统一侧栏中选择远端工作区，右键路径，选择“下载副本并打开”或“在 Finder 中显示副本”。按[读取组件说明](../plugins/remote-files/README.md)安装两端辅助程序。原路径在远端对应窗格的目录下解析；当前 Mac 获取并打开本地副本，编辑回写由用户另行处理。
+
+网络和文件读取在后台进行，每个显示端最多同时处理两个操作。已保存副本按来源与版本隔离；本地编辑过的副本会保留。
+
 ## 验证与回退
 
 用两个不同项目的同名文件验证打开位置，测试中文空格、括号和跨行路径；先选中另一个窗格再点击目标路径，确认没有串目录。图片要看真实附件标记，不能仅凭按键日志认定成功。
 
-本补丁形成时已完成真实鼠标打开/Finder、原有后台附着及图片附件验收。v0.2.0 发布时再次从固定基线应用补丁：格式、Clippy、release 构建通过，`cargo nextest run --locked --bin herdr` 的 3,651 项测试通过、11 项跳过。使用 nextest 隔离进程，避免单进程全套 `cargo test` 中的上游信号测试互相影响。
+v0.3.0 在固定 0.9.5 后台完成 Mac／Linux 远端的真实终端鼠标事件验收：普通、中文空格括号、跨行和字面 shell 字符文件均正确获取，Finder 定位与 TextEdit 打开已回读；不存在文件会在静止画面显示失败提示，获取失败等待期间可切换到本机工作区。Rust 3,657 项测试通过、11 项跳过；Python 73 项测试运行，1 项跳过。公开补丁已从官方固定基线应用，并逐文件核对为相同构建源码。
+
+本补丁形成时已完成本机真实鼠标打开/Finder、原有后台附着及图片附件验收。v0.2.0 发布时再次从固定基线应用补丁：格式、Clippy、release 构建通过，`cargo nextest run --locked --bin herdr` 的 3,651 项测试通过、11 项跳过。使用 nextest 隔离进程，避免单进程全套 `cargo test` 中的上游信号测试互相影响。
 
 完整集成套件未通过：`api_ping::pane_info_and_subscriptions_expose_done_agent_status` 等待模拟 Pi Agent 的完成事件超时；在同一 Mac 的官方 0.9.5 二进制上重放相同 API 流程，也出现超时和 `idle` 状态。此补丁未修改服务端或 Agent 检测，发布保留该已知验证限制，不宣称上游全部测试通过。以上也不代替新机器的真实终端验收。
 

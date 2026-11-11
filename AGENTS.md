@@ -13,7 +13,7 @@
 5. Herdr 使用正常共享 Codex 启动方式。不要为获取窗格变量而全局加入 `--no-daemon`。已有独立实例的锁需查明实际所有者；不能删除锁或停止无关任务。
 6. 将一段用户真正需要的旧对话接入 Herdr，确认原 ID、历史和实时状态。再检查第二段是否独立映射。当前任务仍执行时，可以接入同一个共享后台，不必批量关掉全部 Codex。
 7. 只有官方集成确实出现窗格关联或读取目录问题，才评估可选适配器。先运行 `doctor` 和不带 `--apply` 的 `install`。确认路径和差异后按用户授权应用；不要伪造 Hook 信任哈希，也不要使用绕过信任的参数。
-8. 按需阅读 `docs/session-restore.zh-CN.md`、`docs/desktop-client.zh-CN.md`、`docs/connections-notifications.zh-CN.md`；先证明匹配问题再装扩展。显示端补丁仅支持文档列出的固定基线与本地默认后台。Tailscale 控制面失败按 `docs/network-troubleshooting.zh-CN.md` 区分网络与配置，不默认复制代理/TLS 绕行。
+8. 按需阅读 `docs/session-restore.zh-CN.md`、`docs/desktop-client.zh-CN.md`、`docs/connections-notifications.zh-CN.md`；先证明匹配问题再装扩展。显示端补丁支持文档列出的固定基线；跨机文件查看另读 `plugins/remote-files/README.md`，核对来源机器、实际 Codex 目录、SSH 身份和副本行为。Tailscale 控制面失败按 `docs/network-troubleshooting.zh-CN.md` 区分网络与配置，不默认复制代理/TLS 绕行。
 9. 用户在手机完成真实终端输入、气泡输入、切换、完成状态、锁屏重连与蜂窝验收。记下已通过、受套餐限制、仍未测试的项目。
 
 ## 改动约束
