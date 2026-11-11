@@ -3,7 +3,7 @@
   "base_commit": "2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01",
   "version": "0.9.5",
   "scope": "macOS display client; local and saved macOS/Linux SSH endpoints; original 0.9.5 servers unchanged",
-  "patch_sha256": "7e9208ce0b335b20d69fbed66a0bf7c15b18da496b109bff33609666fd35f7dc",
+  "patch_sha256": "a5f39d82fef7c257fd70da131daa23d6c2252b8cae11a87a42e894d8fca08f0f",
   "modified_paths": [
     "src/client/clipboard_images.rs",
     "src/client/file_jobs.rs",
@@ -19,6 +19,7 @@
     "src/client/shell/state.rs",
     "src/client/shell/tests/endpoint_requests.rs",
     "src/client/shell/tests/endpoints.rs",
+    "src/client/shell/tests/input_conformance.rs",
     "src/client/shell/tests/local_files.rs",
     "src/client/shell/tests/mod.rs",
     "src/client/shell/tests/mouse_selection.rs",

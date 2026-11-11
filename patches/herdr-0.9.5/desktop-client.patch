@@ -733,7 +733,7 @@ index a7d6322..bbd586f 100644
          outcome.repaint = true;
      }
 diff --git a/src/client/shell/input.rs b/src/client/shell/input.rs
-index ee92d59..f0b95bf 100644
+index ee92d59..5ca08fe 100644
 --- a/src/client/shell/input.rs
 +++ b/src/client/shell/input.rs
 @@ -466,6 +466,11 @@ impl ClientShellState {
@@ -797,6 +797,28 @@ index ee92d59..f0b95bf 100644
      /// The tracked press for a release. A press that arrived as text ("A") is
      /// reported released as its key ("a", shifted alternate "A"), possibly after
      /// Shift was let go, so the shifted alternate and the letter's other case
+@@ -1177,7 +1215,20 @@ impl ClientShellState {
+         key: crate::input::TerminalKey,
+         outcome: &mut ClientShellInput,
+     ) {
+-        if let Some(event) = ClientPaneInputEvent::from_terminal_key(key) {
++        // UTF-8 text may be an IME commit or a layout character whose real
++        // release arrives later. Keep the client's lease for that real release,
++        // but do not ask the server to invent one if this viewer disconnects.
++        let text_press = key.kind == KeyEventKind::Press
++            && key.generated_text.is_some()
++            && key
++                .vt_bytes()
++                .is_some_and(|bytes| bytes.first().is_some_and(|byte| *byte != 0x1b));
++        if let Some(mut event) = ClientPaneInputEvent::from_terminal_key(key) {
++            if text_press {
++                if let ClientPaneInputEvent::Key { tracks_release, .. } = &mut event {
++                    *tracks_release = false;
++                }
++            }
+             super::push_target_event(target, event, outcome);
+         }
+     }
 diff --git a/src/client/shell/link_hover.rs b/src/client/shell/link_hover.rs
 index efbc0ee..763c4c7 100644
 --- a/src/client/shell/link_hover.rs
@@ -1673,6 +1695,50 @@ index c0a7e52..bba7ea3 100644
              &mut scheduled,
          )
          .unwrap();
+diff --git a/src/client/shell/tests/input_conformance.rs b/src/client/shell/tests/input_conformance.rs
+index 5053a61..7ca69ed 100644
+--- a/src/client/shell/tests/input_conformance.rs
++++ b/src/client/shell/tests/input_conformance.rs
+@@ -1221,6 +1221,39 @@ fn reporter_split_captures_decode_like_the_unsplit_input() {
+     }
+ }
+ 
++#[cfg(unix)]
++#[tokio::test(flavor = "multi_thread")]
++async fn ime_commit_must_not_leave_server_release_keys_after_client_detach() {
++    use crate::server::clients::{ClientConnection, ClientShellInputTarget};
++
++    for host in [HostProfile::Kitty, HostProfile::Legacy] {
++        for &(pane_name, pane_mode) in PANE_MODES {
++            let mut herdr = HerdrPath::new(host, pane_mode);
++            let outcome = herdr.state.handle_input_bytes("需".as_bytes());
++            let mut connection = ClientConnection::new(
++                (80, 24),
++                crate::kitty_graphics::HostCellSize::default(),
++                1,
++                crate::protocol::RenderEncoding::SemanticFrame,
++                None,
++            );
++            for request in &outcome.requests {
++                if let ClientMessage::ClientShellPaneInput { pane_id, events } = request {
++                    connection
++                        .track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), events);
++                }
++            }
++            assert_eq!(herdr.deliver(vec![outcome]).unwrap(), "需".as_bytes());
++            let held = connection.drain_shell_held_inputs();
++            assert!(
++                held.is_empty(),
++                "{} {pane_name}: IME text left synthetic releases: {held:?}",
++                host.name()
++            );
++        }
++    }
++}
++
+ #[cfg(unix)]
+ #[tokio::test(flavor = "multi_thread")]
+ async fn ime_committed_text_reaches_every_pane_mode_exactly_once() {
 diff --git a/src/client/shell/tests/local_files.rs b/src/client/shell/tests/local_files.rs
 new file mode 100644
 index 0000000..0cd9036

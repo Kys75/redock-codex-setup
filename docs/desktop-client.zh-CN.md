@@ -51,8 +51,8 @@ export SDKROOT="$DEVELOPER_DIR/SDKs/MacOSX.sdk"
 2. 将刚构建的显示端与独立启动器安装到用户目录；若目标已有同名文件，先将旧文件复制到仓库外作为备份，不覆盖正在使用的版本。
 
    ```bash
-   mkdir -p "$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.0" "$HOME/.local/bin"
-   install -m 755 "$herdr_source/target/release/herdr" "$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.0/herdr"
+   mkdir -p "$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.1" "$HOME/.local/bin"
+   install -m 755 "$herdr_source/target/release/herdr" "$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.1/herdr"
    install -m 755 "$setup_repo/patches/herdr-0.9.5/herdr-mouse" "$HOME/.local/bin/herdr-mouse"
    ```
 
@@ -77,11 +77,17 @@ export SDKROOT="$DEVELOPER_DIR/SDKs/MacOSX.sdk"
 
 网络和文件读取在后台进行，每个显示端最多同时处理两个操作。已保存副本按来源与版本隔离；本地编辑过的副本会保留。
 
+## 输入框出现数字和 `;1:3u` 的处理
+
+v0.3.1 修复了普通文字输入被登记为持续按住的键：显示连接断开或切换到别的机器后，旧版可能额外补发 CSI-u 松开编码，文字应用有时会把其尾部显示在输入框。新版保留真正收到的键盘松开事件，同时取消对普通文本的服务器合成松开事件。
+
+更新增强显示端后 Detach 并重新连接即可。原服务器、运行任务和对话历史可以继续保留。若输入框已有旧编码，删除那段文字再输入；本修复没有替用户修改草稿或自动续跑被中断的任务。
+
 ## 验证与回退
 
 用两个不同项目的同名文件验证打开位置，测试中文空格、括号和跨行路径；先选中另一个窗格再点击目标路径，确认没有串目录。图片要看真实附件标记，不能仅凭按键日志认定成功。
 
-v0.3.0 在固定 0.9.5 后台完成 Mac／Linux 远端的真实终端鼠标事件验收：普通、中文空格括号、跨行和字面 shell 字符文件均正确获取，Finder 定位与 TextEdit 打开已回读；不存在文件会在静止画面显示失败提示，获取失败等待期间可切换到本机工作区。Rust 3,657 项测试通过、11 项跳过；Python 73 项测试运行，1 项跳过。公开补丁已从官方固定基线应用，并逐文件核对为相同构建源码。
+v0.3.0 在固定 0.9.5 后台完成 Mac／Linux 远端的真实终端鼠标事件验收：普通、中文空格括号、跨行和字面 shell 字符文件均正确获取，Finder 定位与 TextEdit 打开已回读；不存在文件会在静止画面显示失败提示，获取失败等待期间可切换到本机工作区。v0.3.1 的输入修复另通过 3,658 项 Rust 测试、11 项跳过，并在独立官方后台完成旧新显示端实际字节对照。Rust 3,657 项文件升级测试通过、11 项跳过；Python 73 项测试运行，1 项跳过。公开补丁已从官方固定基线应用，并逐文件核对为相同构建源码。
 
 本补丁形成时已完成本机真实鼠标打开/Finder、原有后台附着及图片附件验收。v0.2.0 发布时再次从固定基线应用补丁：格式、Clippy、release 构建通过，`cargo nextest run --locked --bin herdr` 的 3,651 项测试通过、11 项跳过。使用 nextest 隔离进程，避免单进程全套 `cargo test` 中的上游信号测试互相影响。
 

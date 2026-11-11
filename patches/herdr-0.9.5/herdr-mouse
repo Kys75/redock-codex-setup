@@ -1,9 +1,9 @@
 #!/bin/sh
 # Community local display client. Attach only; never start a Herdr server.
 set -eu
-client_path="$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.0/herdr"
+client_path="$HOME/.local/share/herdr-local/0.9.5-redock-v0.3.1/herdr"
 if [ "${1:-}" = "--version" ]; then
-    printf '%s\n' 'Herdr 0.9.5 community display patch · redock-codex-setup v0.3.0'
+    printf '%s\n' 'Herdr 0.9.5 community display patch · redock-codex-setup v0.3.1'
     exit 0
 fi
 if [ "$#" -ne 0 ]; then
