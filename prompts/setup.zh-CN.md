@@ -15,6 +15,8 @@
 
 若已有旧对话隔夜消失，按 docs/session-restore.zh-CN.md 先只读核验；若需要 Mac 文件鼠标菜单或图片粘贴，按 docs/desktop-client.zh-CN.md 使用固定版本的独立显示端，不替换正在运行的后台。客户端和通知需求按 docs/connections-notifications.zh-CN.md 区分通用配置与设备专用策略。
 
+若我还要操作其他电脑，按 docs/guide.zh-CN.md 第15节，分别核对目标用户、SSH身份、Herdr Session和Codex环境，先验证SSH再登记机器。告诉我每个入口操作哪台电脑，下载的文件副本保存在哪里；手机气泡为对应主机另做配对。需要自动恢复后台时，按第16节说明用户服务的运行条件、日志、暂停和回退方法。整理清单时分别记录配置文件内容、已加载程序版本与实际验收结果。
+
 Tailscale 控制面超时时先按 docs/network-troubleshooting.zh-CN.md 检查实际网络，不默认清除身份、安装代理或修改 TLS。
 
 必须保留我已有的其他 Hooks、MCP、插件和权限习惯。不要默认开启 YOLO。我的私钥、API Key、Tailscale Auth Key、配置内容、会话正文、主机信息和截图都不要上传 GitHub。

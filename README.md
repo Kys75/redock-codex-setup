@@ -13,6 +13,7 @@
 - **后台自动升级后，原对话要发消息才重新出现**：看[旧对话登记自动恢复](docs/session-restore.zh-CN.md)，只修复经过实时核验的已有登记。
 - **Mac 文件路径打开／Finder、鼠标菜单和图片粘贴**：先配置[文件操作插件](plugins/local-files/README.md)，需要鼠标菜单或 Command+V 图片粘贴时，再看[可复现的 Herdr 显示端补丁](docs/desktop-client.zh-CN.md)。
 - **在 Mac 查看其他电脑的文件**：为统一侧栏中的 macOS／Linux SSH 机器配置[远端文件读取组件](plugins/remote-files/README.md)，右键路径获取本地副本。
+- **在一个界面切换几台电脑**：完整教程第 15 节介绍机器登记、SSH 跳板和任务归属；第 16 节说明配置更新、重连与服务恢复。
 - **重复客户端、提示音和通知**：看[连接与通知管理](docs/connections-notifications.zh-CN.md)，按自己的设备决定保留策略。
 - **Tailscale 控制面不可达**：先按[网络排障](docs/network-troubleshooting.zh-CN.md)区分网络、身份与 SSH，避免无故重装。
 
@@ -20,12 +21,14 @@
 
 ## 最短日常路径
 
-前提是 SSH 和 Herdr 已按教程配置。电脑新开一个普通终端：
+前提是 SSH 和 Herdr 已按教程配置。电脑新开一个普通终端，使用官方入口：
 
 ```bash
 cd ~/projects/my-project
 herdr
 ```
+
+已按[增强显示端教程](docs/desktop-client.zh-CN.md)安装的 Mac，日常使用 `herdr-mouse` 连接已经运行的默认后台，以保留文件菜单和支持的图片粘贴。该入口需要单独安装。
 
 进入 Herdr 的 Shell 后，恢复旧对话：
 
@@ -64,10 +67,11 @@ python3 scripts/redock_codex.py install --apply
 
 | 项目 | 证据范围 |
 |---|---|
-| macOS、Codex 0.164.0、Herdr 0.9.5、redock-hook 1.1.6 | 已在真实环境接续旧对话，保留原 ID 与正在执行的任务；Redock 后台可读取对应历史 |
+| 旧对话接续，初次验证为 macOS、Codex 0.164.0、Herdr 0.9.5、redock-hook 1.1.6 | 已在真实环境接续旧对话，保留原 ID 与正在执行的任务；Redock 后台可读取对应历史 |
 | 共享后台的事件关联思路 | 已观察真实后续消息自动关联到正确 Herdr 窗格 |
 | 本仓库通用工具 | 临时目录测试覆盖默认/自定义目录、安装与撤销、Hook 保留、消息不串窗；未覆盖所有用户机器 |
-| Herdr 本地显示端补丁 | 固定 0.9.5 基线、Mac 真实鼠标打开/Finder 和图片附件；发布时复验完整补丁构建，其他平台不作承诺 |
+| Herdr 增强显示端 v0.3.1 | 固定 0.9.5 基线；Mac 本机文件菜单与图片附件、统一侧栏中的 macOS／Linux 文件副本获取已验证；详见显示端说明 |
+| 多机管理与额外恢复服务 | 多机侧栏切换、SSH 复用、三机独立测试后台恢复已实测；系统重启和手机跨机气泡需另验。恢复守护程序保留为主机专用配置，本文提供配置与维护说明 |
 | 旧对话登记恢复 | 临时目录锁协议、并发写入、正文和计时保留；使用私有登记格式，升级必须重验 |
 | 手机气泡收发、完成计时、锁屏和蜂窝重连 | 必须在用户自己的手机分别验收，不能以本机接口成功替代 |
 | Linux / WSL | 设计使用标准 POSIX 工具；自动测试不等于手机端完整实测 |
