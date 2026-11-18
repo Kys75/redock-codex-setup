@@ -68,6 +68,28 @@ class Routing(unittest.TestCase):
         self.assertIsNone(target)
         self.assertNotIn('HERDR_PANE_ID', env)
 
+    def test_partial_inherited_herdr_context_is_cleared_without_a_live_match(self):
+        for marker in (None, ''):
+            with self.subTest(marker=marker):
+                inherited = {'HERDR_PANE_ID': 'w1:p2', 'HERDR_SESSION': 'default'}
+                if marker is not None:
+                    inherited['HERDR_ENV'] = marker
+                env, target = self.route([], env=inherited)
+                self.assertIsNone(target)
+                self.assertNotIn('HERDR_PANE_ID', env)
+                self.assertNotIn('HERDR_SESSION', env)
+
+    def test_lookup_failure_clears_partial_inherited_herdr_context(self):
+        inherited = {'HERDR_PANE_ID': 'w1:p2', 'HERDR_SESSION': 'default',
+                     'TMUX': 'stale', 'TMUX_PANE': '%9'}
+        with patch.dict(os.environ, inherited, clear=True), \
+                patch.object(adapter, 'rpc', side_effect=OSError), \
+                patch.object(adapter.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            adapter.deliver(json.dumps({'session_id': SID}).encode(),
+                            {**self.cfg, 'redock_hook': '/tmp/redock-hook'})
+            self.assertFalse(set(adapter.MUX_KEYS) & run.call_args.kwargs['env'].keys())
+
     def test_duplicate_conversation_is_not_routed(self):
         env, target = self.route([pane(), pane(pid='w1:p2')], env={'TMUX': 'old'})
         self.assertIsNone(target)

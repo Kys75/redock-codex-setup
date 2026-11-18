@@ -238,7 +238,7 @@ def routed_environment(payload, inherited, cfg, call):
     panes = matching_panes(payload.get('session_id'), call)
     if len(panes) != 1:
         # A shared daemon may have inherited a now-stale Herdr pane at startup.
-        if env.get('HERDR_ENV') or panes:
+        if any(env.get(key) for key in MUX_KEYS[:6]) or panes:
             for key in MUX_KEYS:
                 env.pop(key, None)
         return env, None
@@ -262,7 +262,7 @@ def deliver(raw, cfg, chat_only=False):
         env, pane = routed_environment(payload, env, cfg, call)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         # Never send an event to stale inherited Herdr coordinates after lookup failure.
-        if env.get('HERDR_ENV'):
+        if any(env.get(key) for key in MUX_KEYS[:6]):
             for key in MUX_KEYS:
                 env.pop(key, None)
     if pane:
