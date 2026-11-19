@@ -3,7 +3,7 @@
   "base_commit": "2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01",
   "version": "0.9.5",
   "scope": "macOS display client; local and saved macOS/Linux SSH endpoints; original 0.9.5 servers unchanged",
-  "patch_sha256": "a5f39d82fef7c257fd70da131daa23d6c2252b8cae11a87a42e894d8fca08f0f",
+  "patch_sha256": "964340af8d73f22e58a6c598f6c8c2d4cebc0ee700000762de0bd27a10011077",
   "modified_paths": [
     "src/client/clipboard_images.rs",
     "src/client/file_jobs.rs",

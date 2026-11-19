@@ -990,10 +990,10 @@ index efbc0ee..763c4c7 100644
          if !cancelled {
 diff --git a/src/client/shell/local_files.rs b/src/client/shell/local_files.rs
 new file mode 100644
-index 0000000..0f69441
+index 0000000..b8a3fac
 --- /dev/null
 +++ b/src/client/shell/local_files.rs
-@@ -0,0 +1,614 @@
+@@ -0,0 +1,610 @@
 +//! Mouse access to the optional local.file-actions plugin. Presentation only:
 +//! command.invoke reads the actual selection and validates its revision on the
 +//! existing server. Hover never touches the filesystem, clipboard or process tree.
@@ -1351,11 +1351,7 @@ index 0000000..0f69441
 +                    *first <= clicked_col
 +                        && clicked_col < *end
 +                        && looks_like_path(text)
-+                        && (style.fg != 0
-+                            && (*first > 0 || *end < cells.len())
-+                            && !(*first > 0
-+                                && matches!(cells[first - 1].symbol.as_str(), "`" | "\"" | "'"))
-+                            || *first > 0 && matches!(cells[first - 1].symbol.as_str(), "(" | "（")
++                        && (*first > 0 && matches!(cells[first - 1].symbol.as_str(), "(" | "（")
 +                            || cells
 +                                .get(*end)
 +                                .is_some_and(|cell| matches!(cell.symbol.as_str(), ")" | "）")))
@@ -1741,10 +1737,10 @@ index 5053a61..7ca69ed 100644
  async fn ime_committed_text_reaches_every_pane_mode_exactly_once() {
 diff --git a/src/client/shell/tests/local_files.rs b/src/client/shell/tests/local_files.rs
 new file mode 100644
-index 0000000..0cd9036
+index 0000000..5d1a20e
 --- /dev/null
 +++ b/src/client/shell/tests/local_files.rs
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,588 @@
 +use super::*;
 +
 +fn remote_file_state() -> (ClientShellState, ClientEndpointId) {
@@ -1950,6 +1946,54 @@ index 0000000..0cd9036
 +            let selected = params.selection.as_ref().unwrap();
 +            assert_eq!((selected.anchor.col, selected.cursor.col), (8, 26));
 +        }
++    }
++}
++
++#[test]
++fn mouse_file_colored_inline_paths_keep_hover_and_file_actions() {
++    use ratatui::text::{Line, Span};
++
++    for path in ["01_tools/Herdr.md", "README.md", "docs/guide.md:12"] {
++        let mut state = file_state("placeholder");
++        let buffer = Buffer::with_lines(vec![
++            Line::from(vec![
++                Span::raw("See "),
++                Span::styled(path, Style::default().fg(ratatui::style::Color::Cyan)),
++                Span::raw(" for details"),
++            ]),
++            Line::raw(""),
++        ]);
++        let mut next = surface();
++        next.frame = FrameData::from_ratatui_buffer(&buffer, None);
++        next.panes[0].inner_rect.width = next.frame.width;
++        next.panes[0].rect.width = next.frame.width;
++        state.set_pane_surface(next);
++        state.compose(106, 24).unwrap();
++
++        let mouse = file_mouse(&state, 5, MouseEventKind::Moved);
++        state.handle_raw_events(vec![RawInputEvent::Mouse(mouse)]);
++        assert!(state.link_hover.is_some(), "colored inline path {path}");
++        open_file_menu(&mut state, 5);
++        let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
++            panic!("expected file menu for {path}");
++        };
++        let labels = menu
++            .items()
++            .iter()
++            .map(|item| item.label)
++            .collect::<Vec<_>>();
++        assert!(labels.contains(&"打开文件"), "{path}: {labels:?}");
++        assert!(labels.contains(&"在 Finder 中显示"), "{path}: {labels:?}");
++        let outcome = click_file_action(&mut state, "打开文件");
++        let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
++            panic!("expected exact single-row selection for {path}");
++        };
++        let crate::api::schema::Method::CommandInvoke(params) = &request.method else {
++            panic!("expected command invoke");
++        };
++        let selection = params.selection.as_ref().unwrap();
++        assert_eq!(selection.anchor.col, 4);
++        assert_eq!(selection.cursor.col, 4 + path.len() as u16 - 1);
 +    }
 +}
 +

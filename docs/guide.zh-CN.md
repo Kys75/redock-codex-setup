@@ -2,7 +2,7 @@
 
 这份教程的目标是：你在电脑上处理一个项目，离开桌面后，用手机继续同一段 Codex 对话；回到电脑时，仍能看到手机发过的消息和任务进度。项目文件与执行程序留在电脑上。
 
-主线使用 Mac、iPhone、Redock、Herdr 和 Codex 命令行。Linux/WSL 可沿用结构，SSH 安装与系统设置按各自平台处理；Windows 原生路径见[方式比较](options.zh-CN.md)。旧对话接续最初在 Codex 0.164.0、Herdr 0.9.5、redock-hook 1.1.6 上验证。2026-11-12 修订补入多机、通知和维护步骤；可选显示端使用基于 Herdr 0.9.5 的 v0.3.1 补丁，安装说明见[显示端教程](desktop-client.zh-CN.md)。
+主线使用 Mac、iPhone、Redock、Herdr 和 Codex 命令行。Linux/WSL 可沿用结构，SSH 安装与系统设置按各自平台处理；Windows 原生路径见[方式比较](options.zh-CN.md)。旧对话接续最初在 Codex 0.164.0、Herdr 0.9.5、redock-hook 1.1.6 上验证。2026-11-12 修订补入多机、通知和维护步骤，2026-11-19 修复彩色路径菜单；可选显示端使用基于 Herdr 0.9.5 的 v0.3.4 补丁，安装说明见[显示端教程](desktop-client.zh-CN.md)。
 
 你不需要为了这件事建立特殊的 Codex 配置目录。**CLI 是 Command Line Interface（命令行界面）的缩写，不是必须创建的文件夹名称。** 普通 Codex 默认使用 `~/.codex`；`~` 指当前用户的主目录。只有你已经主动设置 `CODEX_HOME` 或启动包装器时，才需要处理不同的目录。
 
